@@ -286,6 +286,20 @@ def codex_running():
         return False
 
 
+def kill_codex():
+    """结束当前所有 Codex 进程（必须带 /T，否则子进程会留着并继承调试端口句柄 → 僵尸监听）。"""
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/IM", "ChatGPT.exe"],
+                       capture_output=True, creationflags=0x08000000)
+    except Exception:
+        pass
+    for _ in range(6):
+        time.sleep(2)
+        if not codex_running():
+            return True
+    return not codex_running()
+
+
 CONFIG = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
 NEED_PLUGINS = ["computer-use@openai-bundled", "chrome@openai-bundled"]
 
@@ -386,9 +400,11 @@ async def main():
         log(f"已有实例带调试端口 {PORT}，直接注入")
     else:
         if codex_running():
-            raise SystemExit(
-                "Codex 已经在运行，但不是通过本启动器启动的（没有调试端口）。\n"
-                "请先完全退出 Codex（连同托盘图标/后台进程），再运行本启动器。")
+            # 有实例在跑，但没有调试端口（比如从开始菜单/托盘起来的，或上次异常退出）
+            # → 结束它并重启为补丁实例。不这样做只会得到一个「点了还是英文」的结果。
+            log("发现没有调试端口的 Codex 实例，结束它并重启为补丁实例")
+            if not await asyncio.to_thread(kill_codex):
+                raise SystemExit("无法结束正在运行的 Codex，请手动完全退出后重试")
 
         # 新启动：让系统分配端口（--remote-debugging-port=0），
         # 这样即使旧实例被强杀后留下「僵尸监听」，也不会撞端口。
