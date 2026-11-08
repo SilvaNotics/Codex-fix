@@ -2,10 +2,23 @@
 
 用法：python eval_js.py 文件.js     或     python eval_js.py -e "1+1"
 """
-import asyncio, json, sys, urllib.request
+import asyncio, json, os, sys, urllib.request
 import websockets
 
-PORT = 9333
+
+def _port():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "cdp_port.txt"),
+                 os.path.join(here, "..", "cdp_port.txt")):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                return int(fh.read().strip())
+        except Exception:
+            continue
+    return 9333
+
+
+PORT = _port()
 
 
 def wsurl():

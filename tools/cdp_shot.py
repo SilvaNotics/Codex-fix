@@ -1,8 +1,21 @@
 """通过 CDP 截取 Codex 渲染页面（不依赖窗口前台状态）。用法：python cdp_shot.py out.png"""
-import asyncio, base64, json, sys, urllib.request
+import asyncio, base64, json, os, sys, urllib.request
 import websockets
 
-PORT = 9333
+
+def _port():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "cdp_port.txt"),
+                 os.path.join(here, "..", "cdp_port.txt")):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                return int(fh.read().strip())
+        except Exception:
+            continue
+    return 9333
+
+
+PORT = _port()
 
 
 def wsurl():

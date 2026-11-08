@@ -11,9 +11,11 @@
 App 更新后不用改脚本。若新版本改了开关实现，补丁会静默失效（界面回英文），不会损坏任何东西。
 """
 import asyncio, glob, json, os, re, subprocess, time, traceback, urllib.request
+import socket
 import websockets
 
 PORT = 9333
+PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cdp_port.txt")
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.log")
 
 
@@ -149,6 +151,44 @@ def http_json(path, timeout=2):
         return json.load(r)
 
 
+def cdp_alive(port, timeout=1.0):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=timeout) as r:
+            json.load(r)
+        return True
+    except Exception:
+        return False
+
+
+def pick_port():
+    """挑一个能用的 CDP 端口。
+
+    坑：上一轮应用被强杀后，监听套接字可能被某个继承了句柄的子进程占着（netstat 里
+    OwningProcess 指向一个已退出的 PID），此时端口既连不上、又 bind 不了。
+    只认「CDP 有应答」或「能 bind」，其余一律跳过并顺延，避免整个启动器卡在等端口上。
+    """
+    for p in range(9333, 9351):
+        if cdp_alive(p):
+            return p
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", p))
+            return p
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return None
+
+
+def save_port(p):
+    try:
+        with open(PORT_FILE, "w", encoding="utf-8") as f:
+            f.write(str(p))
+    except Exception:
+        pass
+
+
 def page_ws():
     try:
         targets = http_json("/json/list")
@@ -262,15 +302,20 @@ def spawn_app():
 
 
 async def main():
+    global PORT
     if not EXE:
         raise SystemExit("没找到 OpenAI.Codex 安装目录（WindowsApps 下无 OpenAI.Codex_*）")
 
     log(ensure_config())
 
+    PORT = await asyncio.to_thread(pick_port)
+    if PORT is None:
+        raise SystemExit("9333~9350 全被占用，找不到可用调试端口")
+    log(f"使用调试端口 {PORT}")
+    save_port(PORT)
+
     launched = False
-    try:
-        http_json("/json/version")
-    except Exception:
+    if not cdp_alive(PORT):
         if codex_running():
             raise SystemExit(
                 "Codex 已经在运行，但不是通过本启动器启动的（没有调试端口）。\n"
@@ -278,14 +323,14 @@ async def main():
         how = await asyncio.to_thread(spawn_app)
         log("启动方式: " + how)
         launched = True
-        for _ in range(200):
-            try:
-                http_json("/json/version")
+        for i in range(240):
+            if cdp_alive(PORT):
                 break
-            except Exception:
-                await asyncio.sleep(0.2)
+            if i and i % 20 == 0:
+                log(f"等待调试端口 {PORT} ... 第 {i // 2} 秒")
+            await asyncio.sleep(0.5)
         else:
-            raise SystemExit("调试端口没起来")
+            raise SystemExit(f"调试端口 {PORT} 在 120 秒内没起来（可能仍被占用，或应用启动失败）")
 
     url = None
     for _ in range(200):

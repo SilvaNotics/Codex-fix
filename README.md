@@ -44,7 +44,8 @@ M = x?.get("enable_i18n", !1)  // 默认 false —— 这就是开关
   └─ wscript.exe  →  start-codex.vbs          （无黑框，动态找 Python）
        └─ pythonw.exe  →  codex_zh_launch.py
             ├─ ensure_config()                 → 检查/补回 config.toml 必要段落
-            ├─ ActivateApplication(AUMID, "--remote-debugging-port=9333")
+            ├─ pick_port()                      → 9333 起找一个能用的端口（被占用就顺延）
+            ├─ ActivateApplication(AUMID, "--remote-debugging-port=<port>")
             │      └─ 官方 Codex 以「包身份」启动（任务栏用官方图标），端口打开
             └─ CDP WebSocket
                  ├─ Page.addScriptToEvaluateOnNewDocument(PATCH)   ← 先挂到页面
@@ -68,6 +69,7 @@ codex-zh/
 ├── activate_codex.py      # IApplicationActivationManager 的 ctypes 封装（带参数按包身份启动）
 ├── start-codex.vbs        # 快捷方式入口：动态定位 pythonw，隐藏窗口运行，失败弹中文提示
 ├── install.ps1            # 一键创建「桌面快捷方式 + 任务栏固定项」
+├── cdp_port.txt           # 运行时自动生成：本次选中的调试端口
 ├── assets/
 │   ├── codex.ico          # 多尺寸图标（16/20/.../256），源自 MSIX 包内官方素材
 │   └── icon-source-256.png
@@ -158,7 +160,8 @@ python tools/cdp_shot.py shot.png
 |---|---|
 | 双击快捷方式没反应 | 看 `vbs.log`：多半是找不到 Python（会弹框提示）；或 `launch.log` 里 `AppX 激活失败` |
 | 弹出「Codex 已经在运行，但不是通过本启动器启动的」 | 之前用开始菜单/任务栏原版图标起过一个实例且还活着。**完全退出 Codex**（含托盘/后台进程）再启动 |
-| 界面仍是英文 | 看 `launch.log` 的 `补丁生效` 行；若 `enable_i18n: true` 但没中文，等久一点（渲染慢）；若 gate 补丁整体失效，说明新版改了 ID |
+| 界面仍是英文 | 看 `launch.log` 的「使用调试端口 N」与「补丁生效」行。若端口被上一轮残留占用，启动器会自动顺延（9333→9334…）；只要看到「补丁生效，界面已是中文」即正常 |
+| 点快捷方式后毫无动静，且 `launch.log` 长时间停在「等待调试端口」 | 上轮应用被强杀过，`netstat -ano \| findstr 9333` 里 OwningProcess 指向一个已退出的 PID（僵尸监听）。启动器现在会自动换端口；实在不对就重启一次，进程退出后套接字才会释放 |
 | 任务栏出现两个图标 | 固定项没写 AUMID。删掉重新跑 `install.ps1` |
 | 任务栏图标糊 | 说明这次是回退路径（`启动方式: popen`）起的，没有包身份。看 `launch.log` |
 | 设置里没有「电脑操控」 | 三个 gate 没打开，或插件没启用（`ensure_config()` 日志会写修补了什么） |
@@ -192,6 +195,7 @@ python tools/cdp_shot.py shot.png
 - **`ctypes.windll` 而不是 `oledll`**：`oledll` 会把 `CoInitializeEx` 的返回码变成异常，导致激活静默失败。
 - **改 Statsig gate 只有一条可行路**：`client.overrideAdapter = { getGateOverride... }` + 清 `_memoCache`。实例上 `getFeatureGate` 是不可配置的类字段（赋值静默无效、`defineProperty` 抛错），`prototype._getFeatureGateImpl` 也被构造时闭包捕获，都试过无效。
 - **读页面文本用 `textContent`**：这个应用经常 `document.body.innerText === ""`，用它判断会误以为白屏。
+- **强杀应用会留下「僵尸监听」**：`taskkill /F` 掉 ChatGPT 后，调试端口的监听套接字可能仍被某个继承了句柄的活进程占着，`netstat` 里 OwningProcess 指向一个已退出的 PID —— 端口既连不上也 bind 不了。这时任何带 `--remote-debugging-port=9333` 的新实例都绑不到端口 → 没有 CDP → 补丁静默全失效（界面英文、CU 入口消失），而启动器只会在等端口那里空转。所以端口必须「探测可用再顺延」，不能硬编码。
 - **写 `.lnk` 的 AUMID 要用 `IShellLink → IPropertyStore → IPersistFile.Save`**：拿 `SHGetPropertyStoreFromParsingName` 直接写会把快捷方式的 target/args 弄丢。
 
 ---
