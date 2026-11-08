@@ -3,7 +3,6 @@
 > 一个 Windows 启动器：**不改动 Codex 安装目录里的任何字节**，让官方 Codex 桌面版显示中文界面，并打开 Computer Use（电脑操控 / Chrome / 应用内浏览器）的远端开关。
 >
 > 实测环境：`OpenAI.Codex 26.1103.4239.0`（MSIX，x64，Chrome 157 / Electron 40）。
-> 当前实际部署位置：`E:\Programs\Codex-zh`；本目录是可移植的干净副本（含 git 版本历史）。
 
 ---
 
@@ -18,7 +17,7 @@ x = Ou("72216192");            // getLayer(layerId)
 M = x?.get("enable_i18n", !1)  // 默认 false —— 这就是开关
 ```
 
-而 layer `72216192` 只在**登录成功后**由 `POST /wham/statsig/bootstrap` 下发。本机跑的是第三方中转（`base_url` 指向中转站）、没有 ChatGPT 登录态，`/wham/*` 一律返回：
+而 layer `72216192` 只在**登录成功后**由 `POST /wham/statsig/bootstrap` 下发。使用第三方中转、或处于未登录状态时，这一串请求会鉴权失败（实测返回）：
 
 ```
 432 Workspace routing is unavailable
@@ -84,8 +83,7 @@ codex-zh/
 - Windows 10/11 x64，且 Codex 是通过 **MSIX / Microsoft Store** 安装的（脚本用 `Get-AppxPackage -Name OpenAI.Codex` 找安装目录）。
 - Python 3.9+。
 - **Python 包：`websockets`**（唯一第三方依赖，用来连 CDP）。
-  - 当前机器上用的是 Hermes 自带的 venv（`%LOCALAPPDATA%\hermes\installs\*\environments\*\venv`），里面已经有 `websockets`。
-  - 若换到别的 Python，先 `pip install websockets`。
+  - 装好 `websockets` 的任意 Python 3.9+ 都可以；入口脚本会自动在常见安装位置和 `PATH` 里查找 `pythonw.exe`。
 - 不需要管理员权限，不需要改系统设置。
 
 ---
@@ -125,7 +123,7 @@ launch.log   启动器日志：配置修补结果、AppX 激活 hr/pid、启动�
 vbs.log      入口日志：这一层选了哪个 Python
 ```
 
-**注意启动速度**：这台机器走中转，`/wham/*` 全部超时，从进程起来到真正渲染出界面需要 **60~90 秒**（期间只有一个居中的 logo，`document.body.textContent` 长度 < 20）。不要误判为卡死。
+**注意启动速度**：应用启动时会先等远端请求超时，从进程起来到真正渲染出界面可能需要几十秒（期间只有一个居中的 logo，`document.body.textContent` 长度 < 20）。不要误判为卡死。
 
 其它入口：
 
@@ -144,7 +142,7 @@ python tools/cdp_shot.py shot.png
 - **版本自适应**：`find_exe()` 每次运行都用 `Get-AppxPackage` 取当前已注册版本，App 升级后不用改脚本。
 - **零文件改动**：`app.asar` / `chrome.dll` 一个字节都没动，MSIX 完整性与签名不受影响，可以正常自动更新。
 - **更新后的风险**：如果新版本改了 Statsig layer/gate 的 ID 或 SDK 结构，补丁会**静默失效**（界面回英文、CU 入口消失），但不会损坏任何文件。届时改 `codex_zh_launch.py` 里的 `LAYER` / `GATES` 常量即可。
-- **CC Switch 等工具会整份覆盖 `~/.codex/config.toml`**，冲掉 `[desktop] localeOverride`、`[plugins.*] enabled`、`[marketplaces.*]`。`ensure_config()` 在每次启动前按需补回：
+- **第三方配置切换工具会把 `~/.codex/config.toml` 整份覆盖**（常见于在多个中转/供应商之间来回切的工具），冲掉 `[desktop] localeOverride`、`[plugins.*] enabled`、`[marketplaces.*]`。`ensure_config()` 在每次启动前按需补回：
   - `[desktop] localeOverride = "zh-CN"`
   - `[plugins."computer-use@openai-bundled"] enabled = true`
   - `[plugins."chrome@openai-bundled"] enabled = true`
