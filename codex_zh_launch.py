@@ -14,7 +14,7 @@ import asyncio, glob, json, os, re, subprocess, time, traceback, urllib.request
 import socket
 import websockets
 
-PORT = 9333
+PORT = 0                      # 运行时决定：新启动用系统分配端口，已有实例用探测到的端口
 PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cdp_port.txt")
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.log")
 
@@ -161,11 +161,11 @@ def cdp_alive(port, timeout=1.0):
 
 
 def pick_port():
-    """挑一个能用的 CDP 端口。
+    """挑一个能用的 CDP 端口（退路用）。
 
     坑：上一轮应用被强杀后，监听套接字可能被某个继承了句柄的子进程占着（netstat 里
     OwningProcess 指向一个已退出的 PID），此时端口既连不上、又 bind 不了。
-    只认「CDP 有应答」或「能 bind」，其余一律跳过并顺延，避免整个启动器卡在等端口上。
+    只认「CDP 有应答」或「能 bind」，其余一律跳过并顺延。
     """
     for p in range(9333, 9351):
         if cdp_alive(p):
@@ -178,6 +178,81 @@ def pick_port():
             continue
         finally:
             s.close()
+    return None
+
+
+_FAM = None
+
+
+def pkg_family():
+    """包族名（带哈希的那个），用来定位 MSIX 的 LocalCache 目录。"""
+    global _FAM
+    if _FAM is None:
+        try:
+            ps = ("(Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version | Select-Object -Last 1)"
+                  ".PackageFamilyName")
+            _FAM = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
+                                  capture_output=True, text=True, timeout=40,
+                                  creationflags=0x08000000).stdout.strip()
+        except Exception:
+            _FAM = ""
+    return _FAM
+
+
+def devtools_file(fam):
+    """Chromium 用 --remote-debugging-port=0 启动时，会把真实端口写进 DevToolsActivePort。"""
+    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", fam, "LocalCache")
+    cands = [
+        os.path.join(base, "Roaming", "Codex", "web", "Codex", "DevToolsActivePort"),
+        os.path.join(base, "Roaming", "Codex", "DevToolsActivePort"),
+        os.path.join(os.path.expanduser("~"), ".codex", "DevToolsActivePort"),
+    ]
+    for c in cands:
+        if os.path.isdir(os.path.dirname(c)):
+            return c
+    return cands[0]
+
+
+def read_devtools_port(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = f.readline().strip()
+        return int(first) if first.isdigit() and int(first) > 0 else None
+    except Exception:
+        return None
+
+
+def has_app_page(port, timeout=1.0):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=timeout) as r:
+            targets = json.load(r)
+        return any(t.get("type") == "page" and t.get("url", "").startswith("app://")
+                   for t in targets)
+    except Exception:
+        return False
+
+
+def find_existing_cdp():
+    """已经有一个带调试端口的实例在跑 → 返回它的端口（优先上次记录 / DevToolsActivePort）。"""
+    cands = []
+    try:
+        with open(PORT_FILE, encoding="utf-8") as f:
+            cands.append(int(f.read().strip()))
+    except Exception:
+        pass
+    fam = pkg_family()
+    if fam:
+        p = read_devtools_port(devtools_file(fam))
+        if p:
+            cands.append(p)
+    cands += list(range(9333, 9351))
+    seen = set()
+    for p in cands:
+        if p in seen:
+            continue
+        seen.add(p)
+        if has_app_page(p):
+            return p
     return None
 
 
@@ -284,11 +359,7 @@ def spawn_app():
                                                       os.path.join(here, "activate_codex.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        ps = ("(Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version | Select-Object -Last 1)"
-              ".PackageFamilyName")
-        fam = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=40,
-                             creationflags=0x08000000).stdout.strip()
+        fam = pkg_family()
         if fam:
             hr, pid = mod.activate(fam + "!App", f"--remote-debugging-port={PORT}")
             log(f"AppX 激活 hr=0x{hr & 0xFFFFFFFF:08X} pid={pid}")
@@ -308,21 +379,52 @@ async def main():
 
     log(ensure_config())
 
-    PORT = await asyncio.to_thread(pick_port)
-    if PORT is None:
-        raise SystemExit("9333~9350 全被占用，找不到可用调试端口")
-    log(f"使用调试端口 {PORT}")
-    save_port(PORT)
-
     launched = False
-    if not cdp_alive(PORT):
+    existing = await asyncio.to_thread(find_existing_cdp)
+    if existing:
+        PORT = existing
+        log(f"已有实例带调试端口 {PORT}，直接注入")
+    else:
         if codex_running():
             raise SystemExit(
                 "Codex 已经在运行，但不是通过本启动器启动的（没有调试端口）。\n"
                 "请先完全退出 Codex（连同托盘图标/后台进程），再运行本启动器。")
+
+        # 新启动：让系统分配端口（--remote-debugging-port=0），
+        # 这样即使旧实例被强杀后留下「僵尸监听」，也不会撞端口。
+        fam = await asyncio.to_thread(pkg_family)
+        dev = devtools_file(fam) if fam else None
+        if dev:
+            try:
+                os.remove(dev)          # 删掉上一轮遗留，避免读到旧端口
+            except OSError:
+                pass
+        PORT = 0
         how = await asyncio.to_thread(spawn_app)
         log("启动方式: " + how)
         launched = True
+
+        got = None
+        for i in range(240):
+            if dev:
+                got = read_devtools_port(dev)
+                if got:
+                    break
+            if i and i % 20 == 0:
+                log(f"等待 DevToolsActivePort ... 第 {i // 2} 秒")
+            await asyncio.sleep(0.5)
+        if got:
+            PORT = got
+            log(f"系统分配调试端口 {PORT}")
+        else:
+            log("没等到 DevToolsActivePort，退回固定端口段探测")
+            PORT = await asyncio.to_thread(pick_port) or 0
+            if not PORT:
+                raise SystemExit("找不到可用调试端口")
+            log(f"使用调试端口 {PORT}")
+    save_port(PORT)
+
+    if not cdp_alive(PORT):
         for i in range(240):
             if cdp_alive(PORT):
                 break
@@ -330,7 +432,7 @@ async def main():
                 log(f"等待调试端口 {PORT} ... 第 {i // 2} 秒")
             await asyncio.sleep(0.5)
         else:
-            raise SystemExit(f"调试端口 {PORT} 在 120 秒内没起来（可能仍被占用，或应用启动失败）")
+            raise SystemExit(f"调试端口 {PORT} 在 120 秒内没起来（应用可能启动失败）")
 
     url = None
     for _ in range(200):
