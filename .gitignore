@@ -1,0 +1,13 @@
+# 运行时产物
+*.log
+watch.pid
+__pycache__/
+*.pyc
+
+# 备份
+*.bak
+*.bak-*
+
+# 个人配置（绝不应入库）
+config.toml
+config.toml.*
