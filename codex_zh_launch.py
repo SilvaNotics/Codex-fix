@@ -8,10 +8,9 @@
     python codex_zh_launch.py        # 未运行 -> 启动原版并注入；已由本启动器启动 -> 只重新注入
 
 版本自适应：每次运行都会重新解析 WindowsApps 下的 OpenAI.Codex_*（取最高版本），
-App 更新后不用改脚本。若新版本改了开关实现，补丁会静默失效（界面回英文），不会损坏任何东西。
+App 路径自动发现；更新后先检查补丁目标，再核验开关与真实导航，失败会报告而非静默成功。
 """
 import asyncio, glob, json, os, re, subprocess, time, traceback, urllib.request
-import socket
 import websockets
 
 PORT = 0                      # 运行时决定：新启动用系统分配端口，已有实例用探测到的端口
@@ -52,22 +51,100 @@ def find_exe():
     return None
 
 
-EXE = find_exe()
+EXE = None  # 延迟发现：导入模块/运行测试不应启动系统探测。
+REQUIRED_GATES = ("1506311413", "410065390", "410262010", "3085093835")
+REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verification.json")
+
+
+def bundle_missing_markers(path):
+    """只读检查当前 ASAR 渲染代码仍引用目标开关，防止对废弃 ID 自证成功。"""
+    import struct
+    missing = set((*REQUIRED_GATES, "72216192", "enable_i18n"))
+    def entries(node, prefix=""):
+        for name, item in node.get("files", {}).items():
+            name = prefix + "/" + name
+            if "files" in item:
+                yield from entries(item, name)
+            elif name.startswith("/webview/") and name.endswith(".js") and not item.get("unpacked"):
+                yield item
+    with open(path, "rb") as stream:
+        prefix = stream.read(16)
+        _, header_size, _, json_size = struct.unpack("<4I", prefix)
+        if json_size > 64 * 1024 * 1024:
+            raise RuntimeError("ASAR 头过大或格式变化")
+        header = json.loads(stream.read(json_size))
+        for item in entries(header):
+            stream.seek(8 + header_size + int(item["offset"]))
+            body = stream.read(item["size"])
+            missing = {marker for marker in missing if marker.encode() not in body}
+            if not missing:
+                break
+    return sorted(missing)
+
+
+def verification_failures(state):
+    """功能开关与真实导航同时成立才通过，不能只凭注入标记自证成功。"""
+    failures = []
+    for key in ("patched", "enable_i18n", "officialLayout", "navigation", "settingsEntry"):
+        if state.get(key) is not True:
+            failures.append(key)
+    if not str(state.get("lang", "")).lower().startswith("zh") or state.get("cjk", 0) < 20:
+        failures.append("chinese-rendering")
+    for gate in REQUIRED_GATES:
+        if state.get("gates", {}).get(gate) is not True:
+            failures.append("gate:" + gate)
+    return failures
+
+
+def write_report(report, path=None):
+    """不记录正文、账号或配置；原子替换，避免失败后残留上次成功报告。"""
+    from pathlib import Path
+    target = Path(path or REPORT)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, target)
+
+
+class CdpSession:
+    def __init__(self, ws):
+        self.ws = ws
+        self.sequence = 0
+
+    async def call(self, method, params=None):
+        self.sequence += 1
+        request_id = self.sequence
+        await self.ws.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+        deadline = time.monotonic() + 15
+        while True:
+            message = json.loads(await asyncio.wait_for(self.ws.recv(), max(0.01, deadline - time.monotonic())))
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                raise RuntimeError(f"CDP {method}: {message['error']}")
+            return message.get("result", {})
+
+    async def evaluate(self, expression):
+        result = await self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        if result.get("exceptionDetails"):
+            raise RuntimeError("JavaScript: " + str(result["exceptionDetails"]))
+        return result.get("result", {}).get("value")
 
 PATCH = r"""
 (() => {
   const LAYER = "72216192";
-  // computer_use / browser 的 Statsig 开关（远端 gate，无登录时恒 false）
-  const GATES = ["1506311413", "410065390", "410262010"];
-  if (window.__zhApplied) { return "already"; }
+  // 只覆盖已验证的功能：CU / 两类浏览器操控 / 官方 rail 导航。
+  // 国内无法连接 Statsig 时布局回退 legacy；无需伪造登录或修改 DOM/CSS。
+  const GATES = ["1506311413", "410065390", "410262010", "3085093835"];
+  if (window.__zhPatchVersion === "layout-v1") { return "already"; }
   window.__zhApplied = true;
-  let ns;
+  window.__zhPatchVersion = "layout-v1";
+  let ns = window.__STATSIG__;
   function fakeGate(s) {
     return { name: s, value: true, ruleID: "local", ruleIDString: "local",
              details: { reason: "override" }, evaluationDetails: { reason: "override" } };
   }
   function installOverride(inst) {
-    if (!inst || inst.__zhOA) return;
+    if (!inst || inst.__zhOA === "layout-v1") return;
     inst.overrideAdapter = {
       getGateOverride: function (gate) {
         var n = gate && gate.name;
@@ -79,7 +156,7 @@ PATCH = r"""
       getLayerOverride: function () { return null; },
       getParameterStoreOverride: function () { return null; },
     };
-    inst.__zhOA = true;
+    inst.__zhOA = "layout-v1";
     try { inst._memoCache = {}; } catch (e) {}
   }
   function patchProto(p) {
@@ -138,10 +215,23 @@ PATCH = r"""
 
 STATE = r"""
 (() => {
-  const t = document.body.innerText || "";
-  let ok = null;
-  try { ok = window.__STATSIG__.firstInstance.getLayer("72216192", {}).get("enable_i18n", false); } catch (e) { ok = "no-client"; }
-  return JSON.stringify({ patched: window.__zhApplied === true, enable_i18n: ok, lang: document.documentElement.lang, cjk: (t.match(/[\u4e00-\u9fff]/g) || []).length, len: t.length });
+  const t = document.body.textContent || "";
+  let ok = null, officialLayout = false;
+  try {
+    const c = window.__STATSIG__.firstInstance;
+    ok = c.getLayer("72216192", {}).get("enable_i18n", false);
+    officialLayout = c.getFeatureGate("3085093835").value === true;
+  } catch (e) { ok = "no-client"; }
+  const gates = {};
+  for (const id of ["1506311413", "410065390", "410262010", "3085093835"]) {
+    try { gates[id] = window.__STATSIG__.firstInstance.getFeatureGate(id).value === true; }
+    catch (_) { gates[id] = false; }
+  }
+  const buttons = [...document.querySelectorAll("button")].filter(b => b.getClientRects().length > 0);
+  const label = b => (b.textContent || "").trim();
+  const navigation = ["首页", "探索"].every(s => buttons.some(b => label(b) === s));
+  const settingsEntry = buttons.some(b => /个人资料|profile/i.test(b.getAttribute("aria-label") || ""));
+  return JSON.stringify({ patched: window.__zhApplied === true, enable_i18n: ok, officialLayout, gates, navigation, settingsEntry, lang: document.documentElement.lang, cjk: (t.match(/[\u4e00-\u9fff]/g) || []).length, len: t.length });
 })()
 """
 
@@ -158,27 +248,6 @@ def cdp_alive(port, timeout=1.0):
         return True
     except Exception:
         return False
-
-
-def pick_port():
-    """挑一个能用的 CDP 端口（退路用）。
-
-    坑：上一轮应用被强杀后，监听套接字可能被某个继承了句柄的子进程占着（netstat 里
-    OwningProcess 指向一个已退出的 PID），此时端口既连不上、又 bind 不了。
-    只认「CDP 有应答」或「能 bind」，其余一律跳过并顺延。
-    """
-    for p in range(9333, 9351):
-        if cdp_alive(p):
-            return p
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind(("127.0.0.1", p))
-            return p
-        except OSError:
-            continue
-        finally:
-            s.close()
-    return None
 
 
 _FAM = None
@@ -199,25 +268,23 @@ def pkg_family():
     return _FAM
 
 
-def devtools_file(fam):
-    """Chromium 用 --remote-debugging-port=0 启动时，会把真实端口写进 DevToolsActivePort。"""
-    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages", fam, "LocalCache")
-    cands = [
+def devtools_files(fam):
+    """候选路径全部检查，不因父目录存在而认定端口文件就在那里。"""
+    local = os.environ.get("LOCALAPPDATA", "")
+    base = os.path.join(local, "Packages", fam, "LocalCache")
+    return [
         os.path.join(base, "Roaming", "Codex", "web", "Codex", "DevToolsActivePort"),
         os.path.join(base, "Roaming", "Codex", "DevToolsActivePort"),
+        os.path.join(os.environ.get("APPDATA", ""), "Codex", "web", "Codex", "DevToolsActivePort"),
         os.path.join(os.path.expanduser("~"), ".codex", "DevToolsActivePort"),
     ]
-    for c in cands:
-        if os.path.isdir(os.path.dirname(c)):
-            return c
-    return cands[0]
 
 
 def read_devtools_port(path):
     try:
         with open(path, encoding="utf-8") as f:
             first = f.readline().strip()
-        return int(first) if first.isdigit() and int(first) > 0 else None
+        return int(first) if first.isdigit() and 0 < int(first) < 65536 else None
     except Exception:
         return None
 
@@ -241,11 +308,10 @@ def find_existing_cdp():
     except Exception:
         pass
     fam = pkg_family()
-    if fam:
-        p = read_devtools_port(devtools_file(fam))
+    for path in devtools_files(fam):
+        p = read_devtools_port(path)
         if p:
             cands.append(p)
-    cands += list(range(9333, 9351))
     seen = set()
     for p in cands:
         if p in seen:
@@ -316,16 +382,24 @@ def ensure_config():
     orig = src
     fixes = []
 
-    if not re.search(r"(?m)^\s*localeOverride\s*=", src):
-        if re.search(r"(?m)^\[desktop\]\s*$", src):
-            src = re.sub(r"(?m)^(\[desktop\]\s*)$", r'\1\nlocaleOverride = "zh-CN"', src, count=1)
+    import tomllib
+    parsed = tomllib.loads(src)  # 原配置非法时立即停止，不在损坏的配置上继续修补。
+    if parsed.get("desktop", {}).get("localeOverride") != "zh-CN":
+        desktop = re.search(r"(?ms)^\[desktop\][ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
+        if desktop:
+            body = desktop.group(1)
+            if re.search(r"(?m)^[ \t]*localeOverride[ \t]*=", body):
+                body = re.sub(r"(?m)^[ \t]*localeOverride[ \t]*=.*$", 'localeOverride = "zh-CN"', body, count=1)
+            else:
+                body = 'localeOverride = "zh-CN"\n' + body
+            src = src[:desktop.start(1)] + body + src[desktop.end(1):]
         else:
             src = src.rstrip("\n") + '\n\n[desktop]\nlocaleOverride = "zh-CN"\n'
         fixes.append("localeOverride=zh-CN")
 
     for plug in NEED_PLUGINS:
         hdr = '[plugins."%s"]' % plug
-        m = re.search(r"(?ms)^" + re.escape(hdr) + r"\s*\n(.*?)(?=^\[|\Z)", src)
+        m = re.search(r"(?ms)^" + re.escape(hdr) + r"[ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
         if not m:
             src = src.rstrip("\n") + "\n\n" + hdr + "\nenabled = true\n"
             fixes.append(plug + " 整段缺失->补回")
@@ -340,7 +414,7 @@ def ensure_config():
             fixes.append(plug + " -> enabled=true")
 
     mp = os.path.join(os.path.expanduser("~"), ".codex", ".tmp", "bundled-marketplaces", "openai-bundled")
-    if "[marketplaces.openai-bundled]" not in src and os.path.isdir(mp):
+    if "openai-bundled" not in parsed.get("marketplaces", {}) and os.path.isdir(mp):
         src = (src.rstrip("\n") + "\n\n[marketplaces.openai-bundled]\nsource_type = \"local\"\n"
                "source = '\\\\?\\" + mp + "'\n")
         fixes.append("marketplaces.openai-bundled 补回")
@@ -350,16 +424,14 @@ def ensure_config():
             return "配置完好，无需修补（注意：requires_openai_auth = true，启动后可能停在登录页）"
         return "配置完好，无需修补"
 
-    try:
-        import tomllib
-        tomllib.loads(src)
-    except Exception as e:
-        return "修补后的 TOML 校验失败，未写入: %r" % (e,)
+    tomllib.loads(src)
 
     with open(CONFIG + ".bak-codexzh", "w", encoding="utf-8", newline="\n") as f:
         f.write(orig)
-    with open(CONFIG, "w", encoding="utf-8", newline="\n") as f:
+    temporary = CONFIG + ".tmp-codexzh"
+    with open(temporary, "w", encoding="utf-8", newline="\n") as f:
         f.write(src)
+    os.replace(temporary, CONFIG)
     return "已修补: " + ", ".join(fixes)
 
 
@@ -386,108 +458,121 @@ def spawn_app():
     return "popen"
 
 
-async def main():
-    global PORT
+async def main(verify_only=False):
+    global PORT, EXE
+    EXE = await asyncio.to_thread(find_exe)
     if not EXE:
-        raise SystemExit("没找到 OpenAI.Codex 安装目录（WindowsApps 下无 OpenAI.Codex_*）")
-
-    log(ensure_config())
-
-    launched = False
+        raise RuntimeError("没找到 OpenAI.Codex 安装目录")
+    missing = await asyncio.to_thread(bundle_missing_markers,
+                                     os.path.join(os.path.dirname(EXE), "resources", "app.asar"))
+    if missing:
+        raise RuntimeError("当前版本缺少补丁目标，停止注入：" + ", ".join(missing))
+    if not verify_only:
+        log(ensure_config())
     existing = await asyncio.to_thread(find_existing_cdp)
     if existing:
         PORT = existing
-        log(f"已有实例带调试端口 {PORT}，直接注入")
+        log(f"连接已有 Codex 调试端口 {PORT}")
+    elif verify_only:
+        raise RuntimeError("没有可核验的 Codex 调试实例；请先通过启动器打开")
     else:
-        if codex_running():
-            # 有实例在跑，但没有调试端口（比如从开始菜单/托盘起来的，或上次异常退出）
-            # → 结束它并重启为补丁实例。不这样做只会得到一个「点了还是英文」的结果。
-            log("发现没有调试端口的 Codex 实例，结束它并重启为补丁实例")
+        if await asyncio.to_thread(codex_running):
+            log("无调试端口的实例：结束进程树后重新启动")
             if not await asyncio.to_thread(kill_codex):
-                raise SystemExit("无法结束正在运行的 Codex，请手动完全退出后重试")
-
-        # 新启动：让系统分配端口（--remote-debugging-port=0），
-        # 这样即使旧实例被强杀后留下「僵尸监听」，也不会撞端口。
-        fam = await asyncio.to_thread(pkg_family)
-        dev = devtools_file(fam) if fam else None
-        if dev:
+                raise RuntimeError("无法结束 Codex，请手动完全退出后重试")
+        paths = devtools_files(await asyncio.to_thread(pkg_family))
+        for path in [PORT_FILE, *paths]:
             try:
-                os.remove(dev)          # 删掉上一轮遗留，避免读到旧端口
-            except OSError:
+                os.remove(path)
+            except FileNotFoundError:
                 pass
         PORT = 0
-        how = await asyncio.to_thread(spawn_app)
-        log("启动方式: " + how)
-        launched = True
-
-        got = None
-        for i in range(240):
-            if dev:
-                got = read_devtools_port(dev)
-                if got:
+        log("启动方式: " + await asyncio.to_thread(spawn_app))
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            for path in paths:
+                p = read_devtools_port(path)
+                if p and await asyncio.to_thread(cdp_alive, p):
+                    PORT = p
                     break
-            if i and i % 20 == 0:
-                log(f"等待 DevToolsActivePort ... 第 {i // 2} 秒")
-            await asyncio.sleep(0.5)
-        if got:
-            PORT = got
-            log(f"系统分配调试端口 {PORT}")
-        else:
-            log("没等到 DevToolsActivePort，退回固定端口段探测")
-            PORT = await asyncio.to_thread(pick_port) or 0
-            if not PORT:
-                raise SystemExit("找不到可用调试端口")
-            log(f"使用调试端口 {PORT}")
-    save_port(PORT)
-
-    if not cdp_alive(PORT):
-        for i in range(240):
-            if cdp_alive(PORT):
+            if PORT:
                 break
-            if i and i % 20 == 0:
-                log(f"等待调试端口 {PORT} ... 第 {i // 2} 秒")
             await asyncio.sleep(0.5)
-        else:
-            raise SystemExit(f"调试端口 {PORT} 在 120 秒内没起来（应用可能启动失败）")
-
+        if not PORT:
+            raise RuntimeError("120 秒内未找到真实调试端口；不再猜测未监听的固定端口")
+    save_port(PORT)
     url = None
     for _ in range(200):
-        url = page_ws()
+        url = await asyncio.to_thread(page_ws)
         if url:
             break
         await asyncio.sleep(0.2)
     if not url:
-        raise SystemExit("找不到页面目标")
-
-    async with websockets.connect(url, max_size=64 * 1024 * 1024) as ws:
-        await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
-        await ws.recv()
-        await ws.send(json.dumps({"id": 2, "method": "Page.addScriptToEvaluateOnNewDocument", "params": {"source": PATCH}}))
-        await ws.recv()
-        await ws.send(json.dumps({"id": 3, "method": "Runtime.evaluate", "params": {"expression": PATCH, "returnByValue": True}}))
-        await ws.recv()
-        print("已启动原版 Codex 并注入" if launched else "Codex 已在运行，已注入")
-
-        for i in range(60):
+        raise RuntimeError("找不到 Codex 页面目标")
+    async with websockets.connect(url, max_size=64 * 1024 * 1024, close_timeout=3) as ws:
+        rpc = CdpSession(ws)
+        await rpc.call("Page.enable")
+        if not verify_only:
+            await rpc.call("Page.addScriptToEvaluateOnNewDocument", {"source": PATCH})
+            await rpc.evaluate(PATCH)
+        deadline = time.monotonic() + (5 if verify_only else 120)
+        state = {}
+        while time.monotonic() < deadline:
+            state = json.loads(await rpc.evaluate(STATE) or "{}")
+            failures = verification_failures(state)
+            if not failures:
+                write_report({"status": "passed", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                              "app_path": EXE, "port": PORT, "state": state})
+                log("核验通过：" + json.dumps(state, ensure_ascii=False))
+                return
             await asyncio.sleep(1)
-            await ws.send(json.dumps({"id": 100 + i, "method": "Runtime.evaluate", "params": {"expression": STATE, "returnByValue": True}}))
-            while True:
-                m = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
-                if m.get("id") == 100 + i:
-                    raw = m["result"]["result"].get("value") or "{}"
-                    v = json.loads(raw)
-                    if v.get("enable_i18n") is True and v.get("cjk", 0) > 20:
-                        print("补丁生效，界面已是中文：", json.dumps(v, ensure_ascii=False))
-                        return
-                    break
-        print("注入完成（30 秒内未确认中文渲染）")
+        write_report({"status": "failed", "port": PORT, "state": state,
+                      "failures": verification_failures(state)})
+        raise RuntimeError("核验失败：" + ", ".join(verification_failures(state)) +
+                           "；可能为新版兼容性变化，请查看 verification.json")
 
 
-try:
-    log("---- 启动器开始运行 ----")
-    asyncio.run(main())
-    log("---- 结束 ----")
-except BaseException as e:
-    log("失败: " + repr(e) + "\n" + traceback.format_exc())
-    raise
+def entry():
+    import argparse
+    import ctypes
+    parser = argparse.ArgumentParser(description="Codex 中文/CU/官方导航启动与核验")
+    parser.add_argument("--verify-only", action="store_true", help="只读核验，不注入、不修配置、不启动应用")
+    options = parser.parse_args()
+    # 命名 mutex 防止重复点击并发启动；句柄退出时关闭，不依赖遗留 pid 文件。
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.restype = ctypes.c_void_p
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.CreateMutexW(None, False, "Local\\CodexZhLauncher")
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if ctypes.get_last_error() == 183:
+        kernel.CloseHandle(handle)
+        log("已有启动器正在执行，本次退出")
+        return 0
+    try:
+        write_report({"status": "checking", "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        log("---- 开始核验 ----")
+        asyncio.run(main(options.verify_only))
+        log("---- 结束（CDP 客户端已断开，无常驻守卫） ----")
+        return 0
+    except Exception as error:
+        log("失败: " + repr(error) + "\n" + traceback.format_exc())
+        # 保留 main 写入的详细失败状态；其他异常也不能残留 passed。
+        try:
+            with open(REPORT, encoding="utf-8") as stream:
+                report = json.load(stream)
+            report.update(status="failed", error=str(error))
+            write_report(report)
+        except Exception:
+            pass
+        if not options.verify_only:
+            ctypes.windll.user32.MessageBoxW(None, str(error), "Codex 启动/兼容性核验失败", 0x10)
+        return 1
+    finally:
+        kernel.CloseHandle(handle)
+
+
+if __name__ == "__main__":
+    raise SystemExit(entry())
 

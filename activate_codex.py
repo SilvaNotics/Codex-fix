@@ -21,7 +21,7 @@ def guid(s):
     return g
 
 
-def activate(aumid, args, timeout_ms=0):
+def activate(aumid, args):
     ole32 = ctypes.windll.ole32
     ole32.CoInitializeEx(None, 2)  # STA；若当前线程已是 MTA 会失败，忽略即可
     p = ctypes.c_void_p()

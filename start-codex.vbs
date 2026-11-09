@@ -2,7 +2,7 @@
 ' 目的：不把 Python 路径写死 —— Hermes 重装/升级后 installs 下的哈希目录会变，
 ' 写死就会双击无反应且没有任何提示。这里运行时动态找 pythonw。
 Option Explicit
-Dim fso, sh, base, logFile, script, pyw, py, f, g, instDir, envDir, line
+Dim fso, sh, base, logFile, script, pyw, py, f, g, instDir, envDir
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh  = CreateObject("WScript.Shell")

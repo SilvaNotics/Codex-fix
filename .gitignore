@@ -12,3 +12,5 @@ __pycache__/
 config.toml
 config.toml.*
 cdp_port.txt
+verification.json
+verification.json.tmp
