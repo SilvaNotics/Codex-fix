@@ -53,6 +53,9 @@ def find_exe():
 
 EXE = None  # 延迟发现：导入模块/运行测试不应启动系统探测。
 REQUIRED_GATES = ("1506311413", "410065390", "410262010", "3085093835")
+ACTIVE_FEATURES = {"computer_use", "browser_use_external", "browser_use", "layout", "i18n"}
+FEATURE_POLICY = {}
+PATCH_VERSION = "layout-v1"
 REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verification.json")
 
 
@@ -85,10 +88,15 @@ def bundle_missing_markers(path):
 def verification_failures(state):
     """功能开关与真实导航同时成立才通过，不能只凭注入标记自证成功。"""
     failures = []
-    for key in ("patched", "enable_i18n", "officialLayout", "navigation", "settingsEntry"):
+    keys = ["patched"]
+    if "i18n" in ACTIVE_FEATURES:
+        keys.append("enable_i18n")
+    if "layout" in ACTIVE_FEATURES:
+        keys.extend(("officialLayout", "navigation", "settingsEntry"))
+    for key in keys:
         if state.get(key) is not True:
             failures.append(key)
-    if not str(state.get("lang", "")).lower().startswith("zh") or state.get("cjk", 0) < 20:
+    if "i18n" in ACTIVE_FEATURES and (not str(state.get("lang", "")).lower().startswith("zh") or state.get("cjk", 0) < 20):
         failures.append("chinese-rendering")
     for gate in REQUIRED_GATES:
         if state.get("gates", {}).get(gate) is not True:
@@ -236,6 +244,44 @@ STATE = r"""
 """
 
 
+PATCH_TEMPLATE = PATCH
+STATE_TEMPLATE = STATE
+
+
+def configure_features(asar):
+    """Rediscover every launch; unsupported/ambiguous roles pass through to vendor defaults."""
+    import hashlib
+    from repair_codex import discover, renderer_sources, ROLES
+    global PATCH, STATE, REQUIRED_GATES, ACTIVE_FEATURES, FEATURE_POLICY, PATCH_VERSION
+    found, evidence = discover(renderer_sources(asar))
+    ACTIVE_FEATURES = set(found)
+    FEATURE_POLICY = {role: {"mode": "override" if role in found else "official-default",
+                              "id": found.get(role),
+                              "reason": "unique-structural-match" if role in found else
+                                        "missing-or-ambiguous-structure; not proof of feature removal"}
+                      for role in ROLES}
+    # A shared ID cannot safely be assigned to unrelated features.
+    from collections import Counter
+    collisions = {value for value, count in Counter(found.values()).items() if count > 1}
+    for role in list(found):
+        if found[role] in collisions:
+            del found[role]
+            FEATURE_POLICY[role] = {"mode": "official-default", "id": None, "reason": "id-collision"}
+    ACTIVE_FEATURES = set(found)
+    REQUIRED_GATES = tuple(found[role] for role in ROLES[:4] if role in found)
+    PATCH_VERSION = "policy-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]
+    gates = json.dumps(list(REQUIRED_GATES))
+    PATCH = re.sub(r'const GATES = \[.*?\];', lambda _: 'const GATES = ' + gates + ';', PATCH_TEMPLATE)
+    PATCH = re.sub(r'const LAYER = "\d+";', lambda _: 'const LAYER = ' + json.dumps(found.get("i18n", "")) + ';', PATCH)
+    PATCH = PATCH.replace('"layout-v1"', json.dumps(PATCH_VERSION))
+    STATE = re.sub(r'for \(const id of \[.*?\]\)', lambda _: 'for (const id of ' + gates + ')', STATE_TEMPLATE)
+    STATE = STATE.replace('"72216192"', json.dumps(found.get("i18n", "")))
+    STATE = STATE.replace('"3085093835"', json.dumps(found.get("layout", "")))
+    for role, policy in FEATURE_POLICY.items():
+        log(role + ": " + policy["mode"] + " (" + policy["reason"] + ")")
+    return FEATURE_POLICY
+
+
 def http_json(path, timeout=2):
     with urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}", timeout=timeout) as r:
         return json.load(r)
@@ -370,7 +416,7 @@ CONFIG = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
 NEED_PLUGINS = ["computer-use@openai-bundled", "chrome@openai-bundled"]
 
 
-def ensure_config():
+def ensure_config(active_features=None):
     """CC Switch 切换供应商时会用自己那份最小模板整份覆盖 config.toml，
     把 [desktop] localeOverride / 插件 enabled / marketplace 一起冲掉。
     这里在启动前按需把这些项补回来（幂等；改动前备份；改完先做 TOML 校验）。"""
@@ -380,11 +426,17 @@ def ensure_config():
     except FileNotFoundError:
         return "没有 config.toml，跳过"
     orig = src
+    active = ACTIVE_FEATURES if active_features is None else set(active_features)
+    plugins = []
+    if "computer_use" in active:
+        plugins.append(NEED_PLUGINS[0])
+    if active & {"browser_use", "browser_use_external"}:
+        plugins.append(NEED_PLUGINS[1])
     fixes = []
 
     import tomllib
     parsed = tomllib.loads(src)  # 原配置非法时立即停止，不在损坏的配置上继续修补。
-    if parsed.get("desktop", {}).get("localeOverride") != "zh-CN":
+    if "i18n" in active and parsed.get("desktop", {}).get("localeOverride") != "zh-CN":
         desktop = re.search(r"(?ms)^\[desktop\][ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
         if desktop:
             body = desktop.group(1)
@@ -397,7 +449,7 @@ def ensure_config():
             src = src.rstrip("\n") + '\n\n[desktop]\nlocaleOverride = "zh-CN"\n'
         fixes.append("localeOverride=zh-CN")
 
-    for plug in NEED_PLUGINS:
+    for plug in plugins:
         hdr = '[plugins."%s"]' % plug
         m = re.search(r"(?ms)^" + re.escape(hdr) + r"[ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
         if not m:
@@ -414,7 +466,7 @@ def ensure_config():
             fixes.append(plug + " -> enabled=true")
 
     mp = os.path.join(os.path.expanduser("~"), ".codex", ".tmp", "bundled-marketplaces", "openai-bundled")
-    if "openai-bundled" not in parsed.get("marketplaces", {}) and os.path.isdir(mp):
+    if plugins and "openai-bundled" not in parsed.get("marketplaces", {}) and os.path.isdir(mp):
         src = (src.rstrip("\n") + "\n\n[marketplaces.openai-bundled]\nsource_type = \"local\"\n"
                "source = '\\\\?\\" + mp + "'\n")
         fixes.append("marketplaces.openai-bundled 补回")
@@ -463,13 +515,21 @@ async def main(verify_only=False):
     EXE = await asyncio.to_thread(find_exe)
     if not EXE:
         raise RuntimeError("没找到 OpenAI.Codex 安装目录")
-    missing = await asyncio.to_thread(bundle_missing_markers,
-                                     os.path.join(os.path.dirname(EXE), "resources", "app.asar"))
-    if missing:
-        raise RuntimeError("当前版本缺少补丁目标，停止注入：" + ", ".join(missing))
+    await asyncio.to_thread(configure_features, os.path.join(os.path.dirname(EXE), "resources", "app.asar"))
     if not verify_only:
-        log(ensure_config())
+        log(ensure_config(ACTIVE_FEATURES))
     existing = await asyncio.to_thread(find_existing_cdp)
+    if existing and not verify_only:
+        PORT = existing
+        target = await asyncio.to_thread(page_ws)
+        if target:
+            async with websockets.connect(target, close_timeout=3) as probe:
+                version = await CdpSession(probe).evaluate("window.__zhPatchVersion || null")
+            if version and version != PATCH_VERSION:
+                # Old prototype wrappers cannot safely be unpatched in-place.
+                if not await asyncio.to_thread(kill_codex):
+                    raise RuntimeError("策略变化，必须完全退出 Codex 才能恢复官方默认行为")
+                existing = None
     if existing:
         PORT = existing
         log(f"连接已有 Codex 调试端口 {PORT}")
@@ -522,7 +582,8 @@ async def main(verify_only=False):
             failures = verification_failures(state)
             if not failures:
                 write_report({"status": "passed", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                              "app_path": EXE, "port": PORT, "state": state})
+                              "app_path": EXE, "port": PORT, "state": state, "features": FEATURE_POLICY,
+                              "verification_scope": "active-overrides-only"})
                 log("核验通过：" + json.dumps(state, ensure_ascii=False))
                 return
             await asyncio.sleep(1)

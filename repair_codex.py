@@ -73,6 +73,10 @@ def discover(sources):
         ids = {row['id'] for row in rows}
         if len(ids) == 1:
             found[role] = next(iter(ids))
+    # Shared IDs across unrelated roles cannot be safely forced.
+    from collections import Counter
+    counts = Counter(found.values())
+    found = {role: value for role, value in found.items() if counts[value] == 1}
     return found, evidence
 
 
@@ -132,12 +136,19 @@ def run(args):
     try:
         found, evidence = discover(renderer_sources(asar))
         report.update(found=found, evidence=evidence)
-        if set(found) != set(ROLES):
-            raise RuntimeError('无法唯一定位全部功能开关；为防误改，已停止。请查看 repair-report.json。')
         before = launcher.read_bytes()
         source = before.decode('utf-8')
         report['previous'] = current_ids(source)
-        after = updated_source(source, found).encode('utf-8')
+        if 'def configure_features(asar):' in source:
+            # Runtime discovery supersedes source rewriting and stale ID persistence.
+            report['features'] = {role: {'mode': 'override' if role in found else 'official-default',
+                                         'id': found.get(role)} for role in ROLES}
+            after = before
+        else:
+            # Compatibility for older launchers remains fail-closed.
+            if set(found) != set(ROLES):
+                raise RuntimeError('旧版启动器不支持逐项回退，请先升级项目。')
+            after = updated_source(source, found).encode('utf-8')
         report['changed'] = after != before
         print(json.dumps({'previous': report['previous'], 'detected': found, 'changed': report['changed']}, ensure_ascii=False, indent=2))
         if args.scan_only:
@@ -159,8 +170,13 @@ def run(args):
         state = json.loads(verification.read_text(encoding='utf-8')) if verification.exists() else {}
         if completed.returncode or state.get('status') != 'passed' or verification.stat().st_mtime_ns == previous_report:
             raise RuntimeError('启动后的真实界面核验未通过；如有修改将恢复启动器。')
+        report['features'] = state.get('features', report.get('features', {}))
         report['status'] = 'passed'
-        print('检测修复及启动核验通过。未修改官方安装包或账号配置。')
+        defaults = [role for role, policy in report['features'].items() if policy['mode'] == 'official-default']
+        report['defaulted_features'] = defaults
+        if defaults:
+            print('以下功能已交还官方默认行为（不表示功能已移除或已经可用）：' + ', '.join(defaults))
+        print('检测与当前有效覆盖项核验通过。未修改官方安装包或账号配置。')
         return 0
     except Exception as error:
         if backup:

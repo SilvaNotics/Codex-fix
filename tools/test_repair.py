@@ -60,7 +60,7 @@ class RepairTests(unittest.TestCase):
     def test_failed_verification_restores_launcher(self):
         from argparse import Namespace
         from unittest.mock import patch
-        source = (ROOT/'codex_zh_launch.py').read_bytes()
+        source = (ROOT/'codex_zh_launch.py').read_bytes().replace(b'def configure_features(asar):', b'def legacy_configure(asar):')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             launcher = root/'codex_zh_launch.py'
