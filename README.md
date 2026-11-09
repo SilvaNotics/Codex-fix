@@ -1,256 +1,292 @@
-# Codex 桌面版中文化 / 电脑操控解锁启动器
+# Codex-fix：Windows Codex 中文化与功能开关启动器
 
-> 一个 Windows 启动器：**不改动 Codex 安装目录里的任何字节**，让官方 Codex 桌面版显示中文界面，并打开 Computer Use（电脑操控 / Chrome / 应用内浏览器）的远端开关。
->
-> 实测环境：`OpenAI.Codex 26.1103.4239.0`（MSIX，x64，Chrome 157 / Electron 40）。
+在不修改官方 Codex 安装文件的前提下，通过启动时的运行时注入，启用已识别的中文界面、电脑操控、浏览器操控与官方导航布局开关。
 
----
+**这是官方桌面版的辅助启动器，不是独立客户端，不提供账号、模型 API 或云端权限。**
 
-## 一、它解决的是什么问题
+已验证安装包：`OpenAI.Codex 26.1103.4239.0`（Windows MSIX，x64）。新版兼容性以实际扫描和核验结果为准。
 
-### 1. 界面调不成中文：卡在远端开关，不是配置问题
+## 1. 功能与限制
 
-Codex 的语言包本来就随应用装在 `app.asar` 里（`/locales/zh-CN.json`、`zh-TW`、`zh-HK` 都在）。界面语言不走 `config.toml`，而是走 Statsig 的一个 layer：
+| 项目 | 本项目的作用 |
+|---|---|
+| 中文界面 | 覆盖已识别的语言开关，按需补充中文配置 |
+| 电脑操控 / Chrome / 应用内浏览器 | 配合主进程环境、插件配置与渲染层开关启用入口 |
+| 官方导航布局 | 明确匹配时启用官方组件，不修改 DOM/CSS |
+| 更新适配 | 每次启动扫描安装包，按功能独立匹配；无法识别的项交回官方默认 |
+| 核验报告 | 输出有效覆盖项的检查结果与回退原因 |
 
-```js
-x = Ou("72216192");            // getLayer(layerId)
-M = x?.get("enable_i18n", !1)  // 默认 false —— 这就是开关
-```
+注意：
 
-官方存在两条 Statsig 初始化路径：ChatGPT 登录后使用 `/wham/statsig/bootstrap`；未登录或使用第三方 provider 时仍可向 `https://ab.chatgpt.com/v1/initialize` 获取功能配置。**未登录不等于不能获取配置。** 国内网络无法连接官方服务时，evaluations 可能为空，界面回退默认英文/旧导航；`432 Workspace routing is unavailable` 则属于需要工作区身份的另一条请求链路。
+- 不绕过登录、工作区身份、订阅、额度或云端权限。`Workspace routing is unavailable` 不能靠本地开关修复。
+- 开启入口不代表任务已端到端可用。模型、网络、Node REPL 和 Windows 沙箱仍可能独立出错。
+- 不保证任意未来版本都能适配；无法识别不等于功能被移除，也不会猜测开关 ID。
+- 通过本项目入口启动才会执行补丁。从开始菜单打开官方入口不会自动注入。
 
-### 官方新导航布局
+## 2. 安装与首次启动
 
-启动器额外启用已验证的布局 gate `3085093835`，让官方 React 组件从 `legacy` 切换到 rail 导航（首页、定时任务、插件、探索）。不改 CSS/DOM，不伪造登录或网络响应，不需要更改系统代理。仅覆盖白名单开关，其他远端配置保持官方默认。
+### 2.1 环境要求
 
-注意：启用布局不等于获得云端权限；需要登录的云服务仍然需要真实账号和可用网络。应用更新后若 gate 或 SDK 结构变化，需重新核验。
+- Windows 10/11 x64。
+- **MSIX / Microsoft Store 版官方 Codex**，能通过 `Get-AppxPackage -Name OpenAI.Codex` 找到。
+- **Python 3.11+**，并在同一解释器环境中安装 **`websockets`**。
+- Windows 自带的 Windows PowerShell 5.1 与 Windows Script Host。
 
-回归测试：`python tools/test_patch.py`（需要 Node.js）。部署目录原脚本备份为 `codex_zh_launch.py.bak-layout`；恢复该文件并完全重启 Codex 即可撤销本轮布局改动。
+**不需要安装 Hermes，不需要修改系统区域设置，也不要求默认以管理员身份运行。** Hermes 自带 Python 只是可选来源。
 
-### 2. Computer Use 不可用：三层限制
-
-| 层 | 条件 | 说明 |
-|---|---|---|
-| 1 主进程 | `CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE=1` | 没有它，主进程根本不准备 CU 管道 |
-| 2 运行时/插件 | `computer-use@openai-bundled` 插件 `enabled = true` | 少一段插件配置就没有入口 |
-| 3 渲染层 Statsig gate | `1506311413`（电脑操控）、`410065390`（Chrome）、`410262010`（浏览器） | 远端配置缺失时默认 `false`，并非未登录就必定关闭 |
-
-本脚本把三层一起补齐。
-
----
-
-## 二、做法：靠调试端口在“首帧之前”注入
-
-```
-快捷方式
-  └─ wscript.exe  →  start-codex.vbs          （无黑框，动态找 Python）
-       └─ pythonw.exe  →  codex_zh_launch.py
-            ├─ ensure_config()                 → 检查/补回 config.toml 必要段落
-            ├─ 已有带调试端口的实例？→ 直接接上去（端口取自 cdp_port.txt / DevToolsActivePort）
-            ├─ ActivateApplication(AUMID, "--remote-debugging-port=0")   ← 让系统分配端口
-            │      └─ 启动后读 <LocalCache>\Roaming\Codex\web\Codex\DevToolsActivePort 拿真实端口
-            │      └─ 官方 Codex 以「包身份」启动（任务栏用官方图标），端口打开
-            └─ CDP WebSocket
-                 ├─ Page.addScriptToEvaluateOnNewDocument(PATCH)   ← 先挂到页面
-                 └─ Runtime.evaluate(PATCH)                        ← 再对当前页面生效
-```
-
-`PATCH` 做两件事：
-
-1. 包裹 Statsig 的 `getLayer`，让 `getLayer("72216192").get("enable_i18n")` 恒为 `true` → 中文界面立刻生效（provider 第一次渲染就拿到 `messages`）。
-2. 设置 `StatsigClient.overrideAdapter.getGateOverride` 并清空 `_memoCache`，让三个 CU gate 返回 `true`。
-
-关键点：**必须在页面挂载前注入**。页面渲染完再改 `getLayer`、发 `$emt` 事件、改窗口大小、触发 `visibilitychange` 都试过——全部无效，因为 i18n 的 `messages` 在 provider 初始化那一刻就定型了。
-
----
-
-## 三、目录结构
-
-```
-codex-zh/
-├── codex_zh_launch.py     # 主启动器：版本自适应找 exe、AppX 激活、CDP 注入、config 自愈
-├── activate_codex.py      # IApplicationActivationManager 的 ctypes 封装（带参数按包身份启动）
-├── start-codex.vbs        # 快捷方式入口：动态定位 pythonw，隐藏窗口运行，失败弹中文提示
-├── install.ps1            # 一键创建「桌面快捷方式 + 任务栏固定项」
-├── cdp_port.txt           # 运行时自动生成：本次实际使用的调试端口（系统分配）
-├── assets/
-│   ├── codex.ico          # 多尺寸图标（16/20/.../256），源自 MSIX 包内官方素材
-│   └── icon-source-256.png
-└── tools/                 # 调试用小工具（不影响启动）
-    ├── eval_js.py         # 对运行中的页面执行一段 JS
-    └── cdp_shot.py        # 通过 CDP 截图
-```
-
----
-
-## 四、依赖
-
-- Windows 10/11 x64，且 Codex 是通过 **MSIX / Microsoft Store** 安装的（脚本用 `Get-AppxPackage -Name OpenAI.Codex` 找安装目录）。
-- Python 3.11+。
-- **Python 包：`websockets`**（唯一第三方依赖，用来连 CDP）。
-  - 装好 `websockets` 的任意 Python 3.11+ 都可以；入口脚本会自动在常见安装位置和 `PATH` 里查找 `pythonw.exe`。
-- 不需要管理员权限，不需要改系统设置。
-
----
-
-## 五、安装
+使用独立 Python 时，将其加入 PATH，并用实际解释器路径安装依赖、检查环境：
 
 ```powershell
-# 在本目录执行；会创建桌面快捷方式 + 任务栏固定项（后者带 AUMID，运行时与原版合并成一个图标）
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+# 替换为真实路径，不要指向 WindowsApps 的商店占位程序
+& 'C:\实际路径\python.exe' -m pip install websockets
+& 'C:\实际路径\python.exe' -c "import sys, websockets; print(sys.version); print(sys.executable)"
 ```
 
-可选参数：
+当前 VBS 入口优先查找 Hermes venv，其次查找 PATH 中的 `pythonw.exe` / `python.exe`。确保入口实际选中的解释器具备依赖。VBS 中“打开或安装 Hermes”的提示不是唯一解决办法，独立 Python 同样可用。
 
-| 参数 | 作用 |
+### 2.2 下载完整项目
+
+下载仓库 ZIP 并完整解压，或使用 Git 克隆。保留脚本与 `assets` 的相对位置，不要只复制一个 VBS 文件。
+
+在包含 `install.ps1`、`start-codex.vbs` 和 `codex_zh_launch.py` 的目录打开 PowerShell。
+
+> **跨电脑编码提醒：** 安装器出现 `using System` 解析错误，或 VBS 提示“未结束的字符串常量 / 800A0409”时，先按第 5.1 节转换编码。无需为此重装 Codex、调整沙箱或修改系统区域设置。
+
+### 2.3 创建快捷方式
+
+确认 Codex 没有正在执行的任务，然后运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+默认创建桌面快捷方式和任务栏目录中的快捷方式，并重启 Explorer。任务栏是否立即显示固定项也受 Windows 版本与策略影响。
+
+| 参数 | 用途 |
 |---|---|
-| `-NoRestart` | 不改完就重启 explorer（固定项要重启资源管理器才会出现在任务栏） |
-| `-SkipTaskbar` | 只建桌面快捷方式 |
+| `-SkipTaskbar` | 只创建桌面快捷方式，不处理任务栏，也不重启 Explorer |
+| `-NoRestart` | 创建快捷方式，但不自动重启 Explorer |
 
-手动做法（等价）：快捷方式目标填
-`C:\Windows\System32\wscript.exe`，参数填 `"<本目录>\start-codex.vbs"`。
-任务栏固定项还要额外写 `System.AppUserModel.ID = OpenAI.Codex_2p2nqsd0c76g0!App`（`install.ps1` 已处理），否则会出现「固定项一个图标 + 运行中一个图标」。
+例如，只安装桌面入口：
 
-### 为什么图标用 `assets\codex.ico`
-
-任务栏按钮的图标来自**运行中的进程**：直接 `Popen(ChatGPT.exe)` 起的进程没有包身份，只能用 exe 内嵌的 32×32 小图标，放到 96px 就是糊的。
-本脚本改用 AppX 激活，进程带包身份，任务栏自动使用 MSIX 官方素材（`Square44x44Logo.targetsize-*`），清晰。
-`codex.ico` 是用同一套官方 PNG 重新拼的多尺寸 ico，只用于快捷方式/固定项本身。
-
----
-
-## 六、使用与日志
-
-正常情况：双击桌面快捷方式（或点任务栏固定项）→ 界面中文。
-
-```
-launch.log   启动器日志：配置修补结果、AppX 激活 hr/pid、启动方式、结束
-vbs.log      入口日志：这一层选了哪个 Python
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipTaskbar
 ```
 
-点击快捷方式后，启动器会依次判断三种情况，都指向「最终得到中文界面」这一个结果：
+### 2.4 启动
 
-| 现状 | 行为 |
+双击桌面的 **Codex 中文**，或直接双击 `start-codex.vbs`。
+
+也可直接用自有 Python 启动，绕过 VBS 的解释器查找：
+
+```powershell
+& 'C:\实际路径\python.exe' .\codex_zh_launch.py
+```
+
+## 3. 日常使用与结果检查
+
+| 当前状态 | 启动器行为 |
 |---|---|
-| 已有实例带调试端口 | 直接连上去注入（不重启应用） |
-| 已有实例但没有调试端口（从开始菜单/托盘起来的） | 结束它，再按包身份带 `--remote-debugging-port=0` 重启并注入 |
-| 什么都没在跑 | 直接启动并注入 |
+| Codex 未运行 | 启动官方应用，获取随机调试端口后注入并核验 |
+| 已有可连接的调试实例 | 连接现有实例，执行所需注入与核验 |
+| 已有不带调试端口的实例 | 结束原进程树，再通过项目入口重启 |
+| 旧补丁运行中且策略指纹变化 | 重启应用，清除旧内存覆盖后应用新策略 |
 
-**注意启动速度**：应用启动时会先等远端请求超时，从进程起来到真正渲染出界面可能需要几十秒（期间只有一个居中的 logo，`document.body.textContent` 长度 < 20）。不要误判为卡死。
+**启动器可能关闭并重启 Codex，请先结束或保存正在执行的任务。** 不要在任务中运行修复入口或反复双击启动器。
 
-其它入口：
+启动受官方远端请求影响，可能在 logo 页面停留几十秒。持续无进展时请查日志。
 
-```bash
-# 对已运行的实例执行 JS（调试用）
-python tools/eval_js.py -e 'document.title'
+### 日志与报告
 
-# 截图（调试用）
-python tools/cdp_shot.py shot.png
-```
+以下文件保存在启动器所在目录：
 
----
-
-## 七、更新与配置管理
-
-- **版本自适应**：`find_exe()` 每次运行都用 `Get-AppxPackage` 取当前已注册版本，App 升级后不用改脚本。
-- **零文件改动**：`app.asar` / `chrome.dll` 一个字节都没动，MSIX 完整性与签名不受影响，可以正常自动更新。
-- **更新后的风险**：启动前只读检查 ASAR 渲染代码仍引用目标 ID/参数；之后核验 SDK 返回值、四个 gate、中文渲染、可见的首页/探索和个人资料入口。任一失败均非零退出，记录 `verification.json`，正常启动模式还会弹框。检测不能保证未来版本语义不变，不会自动猜新 ID。
-- **第三方配置切换工具会把 `~/.codex/config.toml` 整份覆盖**（常见于在多个中转/供应商之间来回切的工具），冲掉 `[desktop] localeOverride`、`[plugins.*] enabled`、`[marketplaces.*]`。`ensure_config()` 在每次启动前按需补回：
-  - `[desktop] localeOverride = "zh-CN"`
-  - `[plugins."computer-use@openai-bundled"] enabled = true`
-  - `[plugins."chrome@openai-bundled"] enabled = true`
-  - `[marketplaces.openai-bundled]`（目录存在时才补）
-
-  幂等；改动前备份 `config.toml.bak-codexzh`；写前用 `tomllib` 校验。**不碰** `model_provider` / `base_url` / `requires_openai_auth` / token。
-
----
-
-## 八、故障排查
-
-| 现象 | 原因 / 处理 |
+| 文件 | 内容 |
 |---|---|
-| 双击快捷方式没反应 | 看 `vbs.log`：多半是找不到 Python（会弹框提示）；或 `launch.log` 里 `AppX 激活失败` |
-| 启动后发现「没有调试端口的 Codex 实例」 | 说明先前从开始菜单/原版图标起过一个实例。启动器会**自动结束它并用带调试端口的方式重启**（`launch.log` 里有「结束它并重启为补丁实例」），无需手动操作 |
-| 界面仍是英文或导航未更新 | 查看 `verification.json` 的 `failures` 与 `launch.log`；只有 `status=passed` 才表示核验通过 |
-| 点快捷方式后毫无动静，且 `launch.log` 长时间停在「等待 DevToolsActivePort」 | 应用没起来。看 `vbs.log`（Python 是否找到）、`启动方式` 是否落到 `popen`；必要时完全退出 Codex 再试 |
-| 任务栏出现两个图标 | 固定项没写 AUMID。删掉重新跑 `install.ps1` |
-| 任务栏图标糊 | 说明这次是回退路径（`启动方式: popen`）起的，没有包身份。看 `launch.log` |
-| 设置里没有「电脑操控」 | 三个 gate 没打开，或插件没启用（`ensure_config()` 日志会写修补了什么） |
+| `vbs.log` | VBS 入口选中的 Python |
+| `launch.log` | 配置补充、应用启动、CDP 连接与核验过程 |
+| `verification.json` | `checking` / `passed` / `failed`，以及各功能覆盖或回退情况 |
+| `repair-report.json` | 修复工具扫描证据与处理结果 |
+| `cdp_port.txt` | 调试端口缓存；只是文本，不会占用端口 |
 
----
+**`passed` 仅表示本次有效覆盖项通过核验。** 某功能为 `official-default` 不意味着已启用；报告也不证明实际操控任务、沙箱或云服务可用。
 
-## 九、已知限制（本地绕不过去）
+## 4. Codex 更新后的检测与修复
 
-- **云端功能**：工作区、插件市场、额度/用量等依赖 `chatgpt.com` 登录态，`/wham/*` 恒 432，无法本地伪造。
-- **「始终允许的应用」列表为空**：app tools 来自 `cua_repl` 通道，`authStatus=unsupported`（未登录），需要真实登录。
-- **从开始菜单启动原版图标仍是英文**：微软的 AppX 激活参数由系统写死，用户侧没有注入点。所以本方案只保证「桌面快捷方式 / 任务栏固定项」这两个入口。
+先通过项目入口正常启动。启动器每次扫描当前安装包，不需要手填开关 ID。
 
----
+若功能没有恢复，且没有正在执行的任务，可双击：
 
-## 十、卸载与回滚
-
-1. 删掉桌面快捷方式、任务栏固定项（右键 → 从任务栏取消固定）、`Startup` 里若有同名项一并删除。
-2. Codex 安装目录：本来就是零改动，无需恢复。
-3. `config.toml` 若被 `ensure_config()` 改过，恢复备份即可：
-   ```powershell
-   Copy-Item "$HOME\.codex\config.toml.bak-codexzh" "$HOME\.codex\config.toml"
-   ```
-
----
-
-## 十一、实现备注（踩过的坑）
-
-- **不能改 `app.asar`**：`WindowsApps` 目录 ACL 拒绝写入；即使拿到管理员权限改掉，Electron 的 asar 完整性 fuse（`EnableEmbeddedAsarIntegrityValidation`）会让改过的副本直接崩溃：
-  `Failed to validate block while ending ASAR file stream: 1`。所以走「原版 + 运行时注入」。
-- **`ActivateApplication` 必须在独立线程调**：asyncio 的 Proactor 已初始化 COM，事件循环线程里初始化 STA 会冲突（`RPC_E_CHANGED_MODE`）。代码里用 `asyncio.to_thread(spawn_app)`。
-- **`ctypes.windll` 而不是 `oledll`**：`oledll` 会把 `CoInitializeEx` 的返回码变成异常，导致激活静默失败。
-- **改 Statsig gate 只有一条可行路**：`client.overrideAdapter = { getGateOverride... }` + 清 `_memoCache`。实例上 `getFeatureGate` 是不可配置的类字段（赋值静默无效、`defineProperty` 抛错），`prototype._getFeatureGateImpl` 也被构造时闭包捕获，都试过无效。
-- **读页面文本用 `textContent`**：这个应用经常 `document.body.innerText === ""`，用它判断会误以为白屏。
-- **端口不要写死**：强杀应用后，旧的调试端口可能变成「僵尸监听」——`netstat` 里 OwningProcess 指向一个已退出的 PID，端口既连不上又 bind 不了（句柄被别的进程继承着，除了重启或结束持有者都释放不掉）。根治办法不是去抢那个端口，而是**不依赖固定端口**：启动时传 `--remote-debugging-port=0` 让系统分配，再从 `DevToolsActivePort` 读回真实端口（实测本机分到 55318 / 60620 都正常）。不再探测或占用固定端口；读取所有已知 DevToolsActivePort 候选路径，超时明确失败。
-- **强杀要带 `/T`**：结束完整进程树，避免仅结束主进程留下子进程。启动器不抢旧端口；完全退出后的释放情况可用生命周期集成测试复核。
-- **写 `.lnk` 的 AUMID 要用 `IShellLink → IPropertyStore → IPersistFile.Save`**：拿 `SHGetPropertyStoreFromParsingName` 直接写会把快捷方式的 target/args 弄丢。
-
----
-
-## 核验与端口生命周期
-
-每次启动生成 `verification.json`：先标记 `checking`，核验全部通过才写 `passed`；失败写 `failed`、失败项，并非零退出。报告不保存对话正文或凭据。检查包括安装包中的目标标记、真实 SDK gate/layer 值、中文和可见导航。它是兼容性检查，不代表已经执行一次电脑操控任务，也不能证明云端权限可用。
-
-```bash
-# 只读检查：不注入、不改配置、不启动/重启 Codex（会更新本地核验报告）
-python codex_zh_launch.py --verify-only
-
-# 自动化回归（测试需要 Node.js，启动器本身不需要）
-python -m unittest discover -s tools -p 'test_*.py' -v
-
-# 手工集成测试：会关闭/重启 Codex，务必在无任务运行时执行
-python tools/check_port_lifecycle.py
+```text
+repair-codex.cmd
 ```
 
-- 启动器不监听 TCP，只作为客户端连接 Codex 的随机回环 CDP 端口；核验结束即断开并退出，无常驻守卫。
-- **关窗口不等于退出**：实测 `Browser.close` 后 Codex 主进程仍在后台，端口自然仍监听。这不是退出后的端口泄漏；需从应用菜单/托盘完全退出。
-- 进程树完全结束后的两轮测试中，旧端口均可独占重新 bind，确认已释放；旧 `cdp_port.txt` 只是文本，不会占端口，下次启动会验证它是否仍有 Codex 页面。
-- 不再使用固定端口扫描/空闲端口兜底。新启动只用 `--remote-debugging-port=0`，读取并验证实际端口；找不到就明确失败。
-- 命名 mutex 防止重复点击导致多个启动器并发，退出自动释放。
-- 官方更新可能改变 ID/SDK/布局；检查失败时保留官方包不动，不猜开关、不改登录配置。
+它寻找 Python 3.11+ 与 `websockets`，扫描安装包并调用启动器检查；必要时可能重启 Codex。它不是保证修好所有新版的工具。
 
-## 双击自动检测修复
+### 自动适配规则
 
-更新 Codex 后如果开关 ID 变化，可双击项目根目录的 **`repair-codex.cmd`**。它自动查找可用的 Python 3.11+（需有 websockets），只读扫描当前已安装的 ASAR，再按功能语义锚点定位中文 layer、电脑操控、两类浏览器操控及官方导航 gate。
+- 中文、电脑操控、两类浏览器操控与布局按功能独立匹配。
+- 唯一且结构明确的匹配生成运行时覆盖。
+- 结构缺失、候选歧义或跨功能 ID 冲突时，该项使用 `official-default`，既不强制开启，也不强制关闭。
+- 回退项不新增对应语言或插件配置；已有用户配置不擅自删除。
+- SDK/CDP 整体异常或安装包损坏仍明确报错，不以回退掩盖失败。
+- 已知结构内的 ID / 混淆变量改名可适配；功能实现、打包结构或 SDK 行为大改仍需人工处理。
 
-- 启动器现在**每次启动动态扫描**，按功能逐项处理，不再要求五项全部匹配，也不再为新版启动器反复改写源码。明确匹配的项生成内存覆盖；结构缺失、歧义或跨功能 ID 冲突的项使用 `official-default`：不覆盖 true，也不强制 false。
-- 例如官方取消 legacy/rail 两种布局，布局识别条件不再成立时，仅布局项交回官方，其余仍可适配。无法匹配不等于已证明功能被移除，报告明确标为结构未识别。
-- 策略指纹变化且已有旧补丁运行时，会完全重启应用以清除旧内存覆盖；不在现有原型包装上叠加所谓撤销逻辑。请勿在任务执行中运行。
-- 核验只要求当前有效覆盖项，不再要求默认布局必须出现“首页/探索”，也不要求默认语言一定是中文。`passed` 表示有效覆盖项核验通过，不代表回退项的功能已经可用。
-- 回退项不再新增对应语言/插件配置；历史已写入的用户配置不擅自删除。SDK/CDP 整体异常、安装包损坏仍明确报错，不以默认模式掩盖启动失败。
-- 仅兼容旧启动器的源码修复分支会生成带时间戳的 `.bak-repair-*`，失败恢复文件；新版使用动态内存策略，不改启动器源码。
-- 无改动时也运行启动器检查。已有非调试实例可能重启，请勿在 Codex 正在执行任务时运行。
-- 不修改官方包、账号或供应商配置；随后启动器仍会按既有机制补语言/插件配置。
-- 生成 `repair-report.json`，含匹配文件、偏移与结果，不包含凭据或对话。
-- **不是任意新版自动适配**：只支持已知代码结构下的 ID/混淆变量改名。功能实现、SDK、参数名或打包结构改变，或候选不唯一时停止，不猜测、不全开 gate。匹配到代码不等于语义绝对不变；CU 完整链路仍需实际任务验证。
+只扫描，不启动应用：
 
-命令行只扫描：`python repair_codex.py --scan-only`。工具仅修改所在目录，仓库与部署副本需分别运行或手动同步。还原时将报告中的备份复制回 `codex_zh_launch.py`，完全退出 Codex 后再启动。
+```powershell
+& 'C:\实际路径\python.exe' './repair_codex.py' --scan-only
+```
 
-## 许可 / 免责
+对已有实例只做核验，不注入、不改配置、不启动或重启应用（会更新核验报告）：
 
-个人自用工具，与 OpenAI 无关联。它不修改、不重新分发 Codex 的任何文件，也不包含任何密钥或账号配置（`config.toml` 里的凭据不会进入本仓库）。
+```powershell
+& 'C:\实际路径\python.exe' .\codex_zh_launch.py --verify-only
+```
+
+工具仅操作所在目录。源码仓库与部署副本不会自动同步。当前动态策略不改启动器源码；仅兼容旧启动器的源码修复分支会生成 `.bak-repair-*` 备份。
+
+## 5. 故障排查
+
+### 5.1 脚本编码兼容性：PowerShell 与 VBScript
+
+**典型情况：同一项目在一台电脑正常，另一台电脑还没启动 Codex 就报语法错误。**
+
+| 入口 | 可能看到的报错 |
+|---|---|
+| `install.ps1` | `using System`、`using 语句必须出现在…之前`、`MissingUsingStatementDirective`，随后大量括号错误 |
+| `start-codex.vbs` | “未结束的字符串常量”，错误代码 `800A0409` |
+
+包含中文的 UTF-8 无 BOM 脚本可能在不同系统代码页下被错误解码。Windows PowerShell 5.1 与传统 Windows Script Host 的编码处理不同，推荐格式为：
+
+- **PS1：UTF-8 带 BOM。**
+- **VBS：UTF-16 LE 带 BOM。不要把 VBS 也统一保存为 UTF-8 BOM。**
+
+已有跨电脑使用者反馈，转换两个入口后恢复正常。**不是所有同类错误都由编码造成**，源码截断或引号损坏也会产生相同症状。
+
+#### 一次修复两个入口
+
+在项目目录打开 PowerShell，执行以下命令。它先备份，再将仓库下载的原始 UTF-8 文件转换成兼容格式；重复执行不覆盖首份备份。
+
+```powershell
+# install.ps1 -> UTF-8 with BOM
+$p = (Resolve-Path .\install.ps1).Path
+if (-not (Test-Path -LiteralPath "$p.encoding.bak")) {
+    Copy-Item -LiteralPath $p -Destination "$p.encoding.bak"
+}
+$text = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText(
+    $p, $text, (New-Object System.Text.UTF8Encoding($true))
+)
+
+# start-codex.vbs -> UTF-16 LE with BOM
+$p = (Resolve-Path .\start-codex.vbs).Path
+if (-not (Test-Path -LiteralPath "$p.encoding.bak")) {
+    Copy-Item -LiteralPath $p -Destination "$p.encoding.bak"
+}
+$text = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText(
+    $p, $text, [System.Text.Encoding]::Unicode
+)
+```
+
+然后重新运行安装器，再从项目入口启动：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+注意：
+
+- `ReadAllText` 会识别已有 BOM，因此命令也可处理已正确转换的文件。
+- 文件若已经错误解码并保存，转码无法找回丢失的字符；请重新下载原文件后再操作。
+- 管理员权限、`ExecutionPolicy Bypass`、关闭沙箱均不能修复源码解析错误，无需更改系统 UTF-8 区域设置。
+- 转换后仍报错时，请提供实际出错的原文件、行号和 Windows / PowerShell 版本，不要只提供截图。
+- 撤销转换：将对应 `.encoding.bak` 复制回原文件。
+- 本节是手动修复方法，不代表仓库入口已经自动转码。
+
+### 5.2 其他问题
+
+| 现象 | 优先检查 |
+|---|---|
+| 双击入口没反应 | 排除 VBS 编译错误，再看 `vbs.log` 的解释器路径与 `launch.log` |
+| 找不到 Python / `No module named websockets` | 安装真实 Python，在入口实际选择的解释器中安装依赖；WindowsApps 商店占位程序不算可用解释器 |
+| 界面英文 / 布局没变化 | 检查 `verification.json` 对应功能是覆盖、回退还是失败，再看日志 |
+| 没有电脑操控入口 | 检查功能匹配、插件配置与主进程环境；入口存在不代表任务权限完整 |
+| 长时间等待 `DevToolsActivePort` | 检查应用是否启动、是否回退为 `popen`；无任务时完全退出后重试 |
+| 任务栏两个图标 / 图标模糊 | 检查快捷方式 AUMID 与启动方式；`popen` 回退没有正常 AppX 包身份 |
+| `Workspace routing is unavailable` | 检查真实账号、工作区与官方服务网络；本项目不伪造云端权限 |
+| “始终允许的应用”列表为空 | 检查 app tools / `cua_repl` 与账号状态；`authStatus=unsupported` 不能靠界面开关解决 |
+| REPL 内核退出 / `windows sandbox failed` | 检查 Codex 自身 REPL 与沙箱日志；这是运行时问题，不能凭本项目的 `passed` 判断已修复 |
+
+## 6. 卸载与回滚
+
+1. 删除项目创建的桌面快捷方式和任务栏固定项。
+2. **完全退出 Codex**，再从官方入口启动，清除进程内覆盖。只关闭窗口可能仍在后台运行。
+3. 官方 `app.asar`、`chrome.dll` 等安装文件未被修改，无需恢复官方包。
+4. 如需撤销配置补充，参考 `%USERPROFILE%\.codex\config.toml.bak-codexzh`。**先备份当前配置并比较差异，不要直接覆盖，以免丢失后续新增的模型或供应商设置。**
+
+启动器按需补充中文、已识别的插件与本地 marketplace 配置，写前备份并校验 TOML；不改模型供应商、API 地址或 token。备份是配置写入前的快照，不保证是首次安装前的原始配置。
+
+## 7. 实现与开发说明
+
+### 启动流程
+
+```text
+桌面快捷方式 / start-codex.vbs
+  -> 查找 pythonw.exe / python.exe
+  -> codex_zh_launch.py
+     -> 定位当前 MSIX 安装包，只读扫描 ASAR
+     -> 按功能生成策略，按需补配置
+     -> 复用调试实例，或通过 AppX 包身份启动官方应用
+     -> --remote-debugging-port=0，由系统分配回环端口
+     -> 从 DevToolsActivePort 读取实际端口
+     -> 通过 CDP 注册首帧前脚本，并对当前页面应用补丁
+     -> 核验有效覆盖项，写报告并退出
+```
+
+中文资源由官方提供，启用与否还受远端 layer 控制。电脑操控涉及主进程环境、插件与渲染层 gate。布局使用官方组件，不改 DOM/CSS，不伪造服务端响应。
+
+未登录或使用第三方 provider 不等于完全无法获取远端配置；官方存在多条初始化路径。远端配置获取失败与需要工作区身份的云端请求失败，应分别排查。
+
+### 文件结构
+
+```text
+Codex-fix/
+├── codex_zh_launch.py       # 启动、动态策略、CDP 注入、配置补充与核验
+├── activate_codex.py        # AppX 激活封装
+├── start-codex.vbs          # 隐藏窗口启动入口
+├── install.ps1             # 创建快捷方式与设置 AUMID
+├── repair-codex.cmd         # 双击检测修复入口
+├── repair-entry.ps1         # 查找并验证 Python 环境
+├── repair_codex.py          # 结构匹配与兼容旧版的修复工具
+├── assets/                 # 快捷方式图标
+└── tools/                  # 自动化测试与调试工具
+```
+
+### 测试
+
+开发环境需要 Python、`websockets`；自动化测试还需要 PATH 中有 Node.js：
+
+```powershell
+& 'C:\实际路径\python.exe' -m unittest discover -s tools -p 'test_*.py' -v
+```
+
+以下手工集成测试会关闭并重启 Codex，**仅在无任务运行时执行**：
+
+```powershell
+& 'C:\实际路径\python.exe' .\tools\check_port_lifecycle.py
+```
+
+### 维护注意事项
+
+- 不改官方包：MSIX ACL 与 Electron ASAR 完整性校验可能阻止或拒绝修改。
+- 不固定 CDP 端口，不扫描其他端口兜底；读取不到实际端口就明确失败。
+- 启动器只是 CDP 客户端，不监听 TCP、不常驻。客户端退出不等于 Codex 调试端口关闭，不要将端口暴露给不可信网络或程序。
+- 重启需结束完整进程树；窗口关闭后后台存活，不能直接判断为端口泄漏。
+- AppX 激活在独立线程执行，避免 asyncio 初始化 COM 后与 STA 冲突。
+- 快捷方式 AUMID 通过 `IShellLink -> IPropertyStore -> IPersistFile.Save` 写入，保留 target、args 与 icon。
+- 发布到其他电脑前检查中文入口编码：PS1 用 UTF-8 BOM，VBS 用 UTF-16 LE BOM。
+
+## 免责声明
+
+个人自用工具，与 OpenAI 无关联。不修改、不重新分发官方 Codex 安装文件；仓库不应包含账号配置、密钥或对话数据。请自行评估运行时功能覆盖与调试端口带来的风险。
