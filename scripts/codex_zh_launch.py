@@ -14,8 +14,14 @@ import asyncio, glob, json, os, re, subprocess, time, traceback, urllib.request
 import websockets
 
 PORT = 0                      # 运行时决定：新启动用系统分配端口，已有实例用探测到的端口
-PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cdp_port.txt")
-LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.log")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT = os.path.join(PROJECT_ROOT, "output")
+LOG_DIR = os.path.join(OUTPUT, "logs")
+BACKUP_DIR = os.path.join(OUTPUT, "backups")
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
+PORT_FILE = os.path.join(LOG_DIR, "cdp_port.txt")
+LOG = os.path.join(LOG_DIR, "launch.log")
 
 
 def log(msg):
@@ -58,7 +64,7 @@ REQUIRED_GATES = ("1506311413", "410065390", "410262010", "3085093835")
 ACTIVE_FEATURES = {"computer_use", "browser_use_external", "browser_use", "layout", "i18n"}
 FEATURE_POLICY = {}
 PATCH_VERSION = "layout-v1"
-REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verification.json")
+REPORT = os.path.join(LOG_DIR, "verification.json")
 
 
 def verification_failures(state):
@@ -463,7 +469,7 @@ def ensure_config(active_features=None):
 
     tomllib.loads(src)
 
-    with open(CONFIG + ".bak-codexzh", "w", encoding="utf-8", newline="\n") as f:
+    with open(os.path.join(BACKUP_DIR, "config.toml.bak-codexzh"), "w", encoding="utf-8", newline="\n") as f:
         f.write(orig)
     temporary = CONFIG + ".tmp-codexzh"
     with open(temporary, "w", encoding="utf-8", newline="\n") as f:

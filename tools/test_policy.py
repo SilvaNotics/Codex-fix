@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from test_repair import FIXTURE
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 
 class PolicyTests(unittest.TestCase):
     def load(self):

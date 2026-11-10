@@ -50,16 +50,18 @@
 
 下载仓库 ZIP 并完整解压，或使用 Git 克隆。保留脚本与 `assets` 的相对位置，不要只复制一个 VBS 文件。
 
-在包含 `install.ps1`、`start-codex.vbs` 和 `codex_zh_launch.py` 的目录打开 PowerShell。
+解压后直接双击根目录 `CLICKME.cmd`：自动检查并修复编码，然后调用 `scripts/install.ps1`。其余程序集中在 `scripts/`，不要单独移动。
 
 > **跨电脑编码提醒：** 安装器出现 `using System` 解析错误，或 VBS 提示“未结束的字符串常量 / 800A0409”时，先按第 5.1 节转换编码。无需为此重装 Codex、调整沙箱或修改系统区域设置。
 
 ### 2.3 创建快捷方式
 
-确认 Codex 没有正在执行的任务，然后运行：
+确认 Codex 没有正在执行的任务，直接双击 **`CLICKME.cmd`** 即可，不需要打开终端。它先检查编码，再调用原安装器；不会自动安装 Python 或依赖。
+
+需要指定参数时，可在项目目录运行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+.\CLICKME.cmd -NoRestart
 ```
 
 默认创建桌面快捷方式和任务栏目录中的快捷方式，并重启 Explorer。任务栏是否立即显示固定项也受 Windows 版本与策略影响。
@@ -72,17 +74,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 例如，只安装桌面入口：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipTaskbar
+.\CLICKME.cmd -SkipTaskbar
 ```
 
 ### 2.4 启动
 
-双击桌面的 **Codex 中文**，或直接双击 `start-codex.vbs`。
+双击桌面的 **Codex 中文**，或直接双击 `scripts/start-codex.vbs`。
 
 也可直接用自有 Python 启动，绕过 VBS 的解释器查找：
 
 ```powershell
-& 'C:\实际路径\python.exe' .\codex_zh_launch.py
+& 'C:\实际路径\python.exe' .\scripts\codex_zh_launch.py
 ```
 
 ## 3. 日常使用与结果检查
@@ -114,7 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipTaskbar
 可在不重启 Codex、不注入补丁、不修改配置的情况下独立诊断：
 
 ```powershell
-& 'C:\实际路径\python.exe' .\runtime_diagnostics.py
+& 'C:\实际路径\python.exe' .\scripts\runtime_diagnostics.py
 ```
 
 - 官方 `codex_app` / `cua_repl` 与用户配置的 MCP 列表不是同一层；诊断不重复注册应用托管服务器。
@@ -125,7 +127,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipTaskbar
 
 ### 日志与报告
 
-以下文件保存在启动器所在目录：
+以下文件统一保存在项目的 `output/logs/`；各类备份统一保存在 `output/backups/`（可能含个人配置，不要分享或上传）。
 
 | 文件 | 内容 |
 |---|---|
@@ -134,6 +136,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipTaskbar
 | `verification.json` | `checking` / `passed` / `failed`，以及各功能覆盖或回退情况 |
 | `repair-report.json` | 修复工具扫描证据与处理结果 |
 | `cdp_port.txt` | 调试端口缓存；只是文本，不会占用端口 |
+
+`output/`、`output/logs/`、`output/backups/` 均通过 `.gitkeep` 保留；Git 只跟踪占位文件，不提交日志、报告或配置备份。
 
 **`passed` 仅表示本次有效覆盖项通过核验。** 某功能为 `official-default` 不意味着已启用；报告也不证明实际操控任务、沙箱或云服务可用。
 
@@ -161,16 +165,16 @@ repair-codex.cmd
 只扫描，不启动应用：
 
 ```powershell
-& 'C:\实际路径\python.exe' './repair_codex.py' --scan-only
+& 'C:\实际路径\python.exe' './scripts/repair_codex.py' --scan-only
 ```
 
 对已有实例只做核验，不注入、不改配置、不启动或重启应用（会更新核验报告）：
 
 ```powershell
-& 'C:\实际路径\python.exe' .\codex_zh_launch.py --verify-only
+& 'C:\实际路径\python.exe' .\scripts\codex_zh_launch.py --verify-only
 ```
 
-工具仅操作所在目录。源码仓库与部署副本不会自动同步。当前动态策略不改启动器源码；仅兼容旧启动器的源码修复分支会生成 `.bak-repair-*` 备份。
+工具使用本项目的脚本与 output 目录；启动及修复可能按需补充用户 Codex 配置。源码仓库与部署副本不会自动同步。当前动态策略不改启动器源码；仅兼容旧启动器的源码修复分支会生成 `.bak-repair-*` 备份。
 
 ## 5. 故障排查
 
@@ -190,46 +194,11 @@ repair-codex.cmd
 
 已有跨电脑使用者反馈，转换两个入口后恢复正常。**不是所有同类错误都由编码造成**，源码截断或引号损坏也会产生相同症状。
 
-#### 一次修复两个入口
+#### 自动检查与修复
 
-在项目目录打开 PowerShell，执行以下命令。它先备份，再将仓库下载的原始 UTF-8 文件转换成兼容格式；重复执行不覆盖首份备份。
+双击根目录 `CLICKME.cmd`。入口自身仅含 ASCII，不依赖系统代码页；在执行安装器前，将 `scripts/install.ps1` 规范为 UTF-8 BOM、`scripts/start-codex.vbs` 规范为 UTF-16 LE BOM。首次转换备份保存于 `output/backups/*.bak-encoding`，重复运行不覆盖原备份；无法严格解码时停止，不猜测源编码。
 
-```powershell
-# install.ps1 -> UTF-8 with BOM
-$p = (Resolve-Path .\install.ps1).Path
-if (-not (Test-Path -LiteralPath "$p.encoding.bak")) {
-    Copy-Item -LiteralPath $p -Destination "$p.encoding.bak"
-}
-$text = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
-[System.IO.File]::WriteAllText(
-    $p, $text, (New-Object System.Text.UTF8Encoding($true))
-)
-
-# start-codex.vbs -> UTF-16 LE with BOM
-$p = (Resolve-Path .\start-codex.vbs).Path
-if (-not (Test-Path -LiteralPath "$p.encoding.bak")) {
-    Copy-Item -LiteralPath $p -Destination "$p.encoding.bak"
-}
-$text = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
-[System.IO.File]::WriteAllText(
-    $p, $text, [System.Text.Encoding]::Unicode
-)
-```
-
-然后重新运行安装器，再从项目入口启动：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-注意：
-
-- `ReadAllText` 会识别已有 BOM，因此命令也可处理已正确转换的文件。
-- 文件若已经错误解码并保存，转码无法找回丢失的字符；请重新下载原文件后再操作。
-- 管理员权限、`ExecutionPolicy Bypass`、关闭沙箱均不能修复源码解析错误，无需更改系统 UTF-8 区域设置。
-- 转换后仍报错时，请提供实际出错的原文件、行号和 Windows / PowerShell 版本，不要只提供截图。
-- 撤销转换：将对应 `.encoding.bak` 复制回原文件。
-- 本节是手动修复方法，不代表仓库入口已经自动转码。
+文件若已被错误解码并保存，转码不能找回丢失字符，请重新下载。仍有语法错误时请提供具体文件、行号与系统版本。
 
 ### 5.2 其他问题
 
@@ -250,7 +219,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 1. 删除项目创建的桌面快捷方式和任务栏固定项。
 2. **完全退出 Codex**，再从官方入口启动，清除进程内覆盖。只关闭窗口可能仍在后台运行。
 3. 官方 `app.asar`、`chrome.dll` 等安装文件未被修改，无需恢复官方包。
-4. 如需撤销配置补充，参考 `%USERPROFILE%\.codex\config.toml.bak-codexzh`。**先备份当前配置并比较差异，不要直接覆盖，以免丢失后续新增的模型或供应商设置。**
+4. 如需撤销配置补充，参考 `output/backups/config.toml.bak-codexzh`。**先备份当前配置并比较差异，不要直接覆盖，以免丢失后续新增的模型或供应商设置。**
 
 启动器按需补充中文、已识别的插件与本地 marketplace 配置，写前备份并校验 TOML；不改模型供应商、API 地址或 token。备份是配置写入前的快照，不保证是首次安装前的原始配置。
 
@@ -279,14 +248,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 ```text
 Codex-fix/
-├── codex_zh_launch.py       # 启动、动态策略、CDP 注入、配置补充与核验
-├── activate_codex.py        # AppX 激活封装
-├── start-codex.vbs          # 隐藏窗口启动入口
-├── install.ps1             # 创建快捷方式与设置 AUMID
+├── CLICKME.cmd              # 编码检查后调用已有安装器
 ├── repair-codex.cmd         # 双击检测修复入口
-├── repair-entry.ps1         # 查找并验证 Python 环境
-├── repair_codex.py          # 结构匹配与兼容旧版的修复工具
-├── runtime_diagnostics.py   # 组件只读诊断与精确会话配置清理
+├── README.md
+├── scripts/                # Python / PowerShell / VBS 运行脚本
+│   ├── install.ps1
+│   ├── start-codex.vbs
+│   ├── repair-entry.ps1
+│   ├── codex_zh_launch.py
+│   ├── activate_codex.py
+│   ├── repair_codex.py
+│   └── runtime_diagnostics.py
+├── output/                 # .gitkeep 保留目录，运行产物由 Git 忽略
+│   ├── logs/               # 日志、核验报告、端口缓存与修复锁
+│   └── backups/            # 编码、源码与配置备份
 ├── assets/                 # 快捷方式图标
 └── tools/                  # 自动化测试与调试工具
 ```

@@ -14,7 +14,9 @@ import urllib.request
 import websockets
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('launcher', ROOT / 'codex_zh_launch.py')
+SCRIPTS = ROOT / 'scripts'
+REPORT = ROOT / 'output' / 'logs' / 'verification.json'
+spec = importlib.util.spec_from_file_location('launcher', SCRIPTS / 'codex_zh_launch.py')
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 
@@ -41,8 +43,8 @@ async def close_browser(port):
 def run():
     results = []
     for mode in ['graceful', 'process-tree']:
-        subprocess.run([sys.executable, str(ROOT/'codex_zh_launch.py')], check=True, timeout=200)
-        report = json.loads((ROOT/'verification.json').read_text(encoding='utf-8'))
+        subprocess.run([sys.executable, str(SCRIPTS/'codex_zh_launch.py')], check=True, timeout=200)
+        report = json.loads(REPORT.read_text(encoding='utf-8'))
         assert report['status'] == 'passed'
         port = report['port']
         assert not port_free(port), 'live app must own port'
@@ -67,10 +69,10 @@ def run():
         print(json.dumps(row), flush=True)
         assert released and not running, 'port or process remained after full exit'
         # Verify-only must fail without restarting a closed app.
-        check = subprocess.run([sys.executable, str(ROOT/'codex_zh_launch.py'), '--verify-only'], timeout=60)
+        check = subprocess.run([sys.executable, str(SCRIPTS/'codex_zh_launch.py'), '--verify-only'], timeout=60)
         assert check.returncode != 0
-        assert json.loads((ROOT/'verification.json').read_text(encoding='utf-8'))['status'] == 'failed'
-    subprocess.run([sys.executable, str(ROOT/'codex_zh_launch.py')], check=True, timeout=200)
+        assert json.loads(REPORT.read_text(encoding='utf-8'))['status'] == 'failed'
+    subprocess.run([sys.executable, str(SCRIPTS/'codex_zh_launch.py')], check=True, timeout=200)
     print(json.dumps({'results': results, 'final_restart': 'passed'}))
 
 if __name__ == '__main__':

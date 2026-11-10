@@ -5,7 +5,7 @@ import pathlib
 import subprocess
 import unittest
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[1] / 'scripts'
 
 def literal(name):
     tree = ast.parse((ROOT / 'codex_zh_launch.py').read_text(encoding='utf-8'))

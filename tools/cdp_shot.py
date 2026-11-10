@@ -5,8 +5,7 @@ import websockets
 
 def _port():
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, "cdp_port.txt"),
-                 os.path.join(here, "..", "cdp_port.txt")):
+    for cand in (os.path.join(here, "..", "output", "logs", "cdp_port.txt"),):
         try:
             with open(cand, encoding="utf-8") as fh:
                 return int(fh.read().strip())

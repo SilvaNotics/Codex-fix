@@ -1,4 +1,4 @@
-# 只需 Windows 自带的 Windows PowerShell 5.1 即可运行
+﻿# 只需 Windows 自带的 Windows PowerShell 5.1 即可运行
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoRestart      # 不重启 explorer
@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $vbs = Join-Path $dir 'start-codex.vbs'
-$ico = Join-Path $dir 'assets\codex.ico'
+$ico = Join-Path (Split-Path -Parent $dir) 'assets\codex.ico'
 $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
 $appUserModelId = 'OpenAI.Codex_2p2nqsd0c76g0!App'
 

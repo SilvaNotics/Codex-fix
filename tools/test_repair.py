@@ -5,7 +5,7 @@ import struct
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 spec = importlib.util.spec_from_file_location('repair', ROOT / 'repair_codex.py')
 repair = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(repair)
@@ -62,13 +62,15 @@ class RepairTests(unittest.TestCase):
         from unittest.mock import patch
         source = (ROOT/'codex_zh_launch.py').read_bytes().replace(b'def configure_features(asar):', b'def legacy_configure(asar):')
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory) / 'scripts'
+            root.mkdir()
             launcher = root/'codex_zh_launch.py'
             launcher.write_bytes(source)
             with patch.object(repair, 'ROOT', root), patch.object(repair, 'renderer_sources', return_value=[('test.js', FIXTURE)]), patch.object(repair.subprocess, 'run', side_effect=[None, RuntimeError('simulated child failure')]):
                 self.assertEqual(repair.run(Namespace(asar='test.asar', scan_only=False)), 1)
             self.assertEqual(launcher.read_bytes(), source)
-            report = json.loads((root/'repair-report.json').read_text(encoding='utf-8'))
+            report = json.loads((root.parent/'output/logs/repair-report.json').read_text(encoding='utf-8'))
+            self.assertEqual(Path(report['backup']).parent, root.parent/'output/backups')
             self.assertTrue(report['rolled_back'])
             self.assertEqual(report['status'], 'failed')
 

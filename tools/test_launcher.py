@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 spec = importlib.util.spec_from_file_location('launcher', ROOT / 'codex_zh_launch.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -33,7 +33,7 @@ class VerificationTests(unittest.TestCase):
         from types import SimpleNamespace
         def broken():
             raise TypeError('invalid private configuration')
-        with patch.dict(sys.modules, {'runtime_diagnostics': SimpleNamespace(collect=broken)}):
+        with patch.dict(sys.modules, {'runtime_diagnostics': SimpleNamespace(collect=broken)}), patch.object(module, 'log'):
             self.assertEqual(module.component_diagnostics()['status'], 'unavailable')
 
     def test_partial_patch_is_not_success(self):
@@ -64,7 +64,7 @@ class VerificationTests(unittest.TestCase):
                         'base_url="https://example.invalid/v1"\nrequires_openai_auth=false\n'
                         '[desktop]\nlocaleOverride="en-US"\n')
             path.write_text(original, encoding='utf-8')
-            with patch.object(module, 'CONFIG', str(path)):
+            with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d):
                 module.ensure_config()
                 result = tomllib.loads(path.read_text(encoding='utf-8'))
                 self.assertEqual(result['desktop']['localeOverride'], 'zh-CN')
@@ -80,7 +80,7 @@ class VerificationTests(unittest.TestCase):
             path = Path(d) / 'config.toml'
             path.write_text('[desktop] # language\nlocaleOverride="en-US"\n'
                             '[plugins."computer-use@openai-bundled"] # installed\nenabled=false\n', encoding='utf-8')
-            with patch.object(module, 'CONFIG', str(path)):
+            with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d):
                 module.ensure_config()
             data = tomllib.loads(path.read_text(encoding='utf-8'))
             self.assertEqual(data['desktop']['localeOverride'], 'zh-CN')

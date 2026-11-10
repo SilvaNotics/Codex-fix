@@ -53,7 +53,9 @@ def repair_session_config(path):
     # Refuse a concurrent writer instead of discarding its changes.
     if path.read_bytes() != before:
         raise RuntimeError('Codex configuration changed during cleanup; retry after closing the editor')
-    backup = path.with_name(path.name+'.bak-session-'+str(time.time_ns()))
+    backup_dir = Path(__file__).resolve().parents[1] / 'output' / 'backups'
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / (path.name+'.bak-session-'+str(time.time_ns()))
     with backup.open('xb') as stream:
         stream.write(before)
     temporary = path.with_name(path.name+'.session-tmp-'+str(os.getpid()))

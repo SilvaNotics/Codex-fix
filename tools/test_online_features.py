@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 spec = importlib.util.spec_from_file_location('online_repair', ROOT/'repair_codex.py')
 repair = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(repair)

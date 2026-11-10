@@ -164,7 +164,12 @@ def run(args):
     launcher = ROOT / 'codex_zh_launch.py'
     asar = Path(args.asar) if args.asar else find_asar()
     report = {'status': 'scanning', 'asar': str(asar), 'time': time.strftime('%Y-%m-%dT%H:%M:%S')}
-    report_path = ROOT / 'repair-report.json'
+    output = ROOT.parent / 'output'
+    logs = output / 'logs'
+    backups = output / 'backups'
+    logs.mkdir(parents=True, exist_ok=True)
+    backups.mkdir(parents=True, exist_ok=True)
+    report_path = logs / 'repair-report.json'
     backup = None
     try:
         found, evidence = discover(renderer_sources(asar))
@@ -191,14 +196,14 @@ def run(args):
         # Verify dependencies before modifying a launcher. Scanner itself is stdlib-only.
         subprocess.run([sys.executable, '-c', 'import websockets'], check=True, timeout=15)
         if after != before:
-            backup = launcher.with_name(launcher.name + '.bak-repair-' + time.strftime('%Y%m%d-%H%M%S') + '-' + str(os.getpid()))
+            backup = backups / (launcher.name + '.bak-repair-' + time.strftime('%Y%m%d-%H%M%S') + '-' + str(os.getpid()))
             backup.write_bytes(before)
             report['backup'] = str(backup)
             atomic_write(launcher, after)
         print('正在运行启动器并核验。已有非调试实例可能被重启，请勿在 Codex 执行任务期间运行。', flush=True)
         # Child owns normal launcher mutex. ID repair uses a separate exclusive lock.
         # Do not accept a stale passed report if child exits early due to its mutex.
-        verification = ROOT / 'verification.json'
+        verification = logs / 'verification.json'
         previous_report = verification.stat().st_mtime_ns if verification.exists() else None
         completed = subprocess.run([sys.executable, str(launcher)], timeout=240)
         state = json.loads(verification.read_text(encoding='utf-8')) if verification.exists() else {}
@@ -232,7 +237,9 @@ def main():
     args = parser.parse_args()
     # Windows OS lock automatically releases after crashes; lock file may remain.
     import msvcrt
-    with (ROOT / 'repair.lock').open('a+b') as lock:
+    logs = ROOT.parent / 'output' / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    with (logs / 'repair.lock').open('a+b') as lock:
         lock.seek(0)
         if not lock.read(1):
             lock.write(b'0')

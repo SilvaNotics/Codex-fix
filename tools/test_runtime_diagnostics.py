@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / 'scripts'
 
 class RuntimeDiagnosticsTests(unittest.TestCase):
     def load(self):
@@ -13,6 +13,10 @@ class RuntimeDiagnosticsTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('runtime_diagnostics_test', path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        # Production resolves backups relative to its script location; sandbox it.
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        module.__file__ = str(Path(sandbox.name)/'scripts/runtime_diagnostics.py')
         return module
 
     def test_inventory_and_stale_paths_do_not_expose_secrets_or_mutate(self):
@@ -97,6 +101,7 @@ enabled = true
             text = '[plugins."computer-use@openai-bundled"]\nenabled = false\n'
             config.write_text(text, encoding='utf-8')
             launcher.CONFIG = str(config)
+            launcher.BACKUP_DIR = tmp
             launcher.ensure_config({'computer_use'})
             self.assertEqual(config.read_text(encoding='utf-8'), text,
                              'launcher must not reverse explicit plugin permission choices')
