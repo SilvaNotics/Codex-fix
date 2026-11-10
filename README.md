@@ -4,7 +4,7 @@
 
 **这是官方桌面版的辅助启动器，不是独立客户端，不提供账号、模型 API 或云端权限。**
 
-已验证安装包：`OpenAI.Codex 26.1103.4239.0`（Windows MSIX，x64）。新版兼容性以实际扫描和核验结果为准。
+已验证安装包：`OpenAI.Codex 26.1103.4239.0` 与 `26.1103.7773.0`（Windows MSIX，x64）；后者已做安装包结构匹配检查，SSH / Appshots 完整任务仍需实际使用验证。新版兼容性以实际扫描和核验结果为准。
 
 ## 1. 功能与限制
 
@@ -13,6 +13,8 @@
 | 中文界面 | 覆盖已识别的语言开关，按需补充中文配置 |
 | 电脑操控 / Chrome / 应用内浏览器 | 配合主进程环境、插件配置与渲染层开关启用入口 |
 | 官方导航布局 | 明确匹配时启用官方组件，不修改 DOM/CSS |
+| SSH 连接设置 | 补齐结构明确匹配的远程连接入口开关，保留本地主机与工作模式限制 |
+| 应用快照（Appshots） | 补齐通用与 Windows rollout 开关，保留管理员策略和原生 helper 能力检查 |
 | 更新适配 | 每次启动扫描安装包，按功能独立匹配；无法识别的项交回官方默认 |
 | 核验报告 | 输出有效覆盖项的检查结果与回退原因 |
 
@@ -95,6 +97,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipTaskbar
 **启动器可能关闭并重启 Codex，请先结束或保存正在执行的任务。** 不要在任务中运行修复入口或反复双击启动器。
 
 启动受官方远端请求影响，可能在 logo 页面停留几十秒。持续无进展时请查日志。
+
+启动扫描使用语义锚点限定正则搜索范围，仍扫描所有渲染 JS 以检测歧义，不缓存固定 gate ID；包路径与包族名合并为一次系统查询。SDK 赋值/读取仍立即触发补丁，兜底轮询由 2ms 调为 100ms，减少渲染进程空转。
+
+### SSH 与应用快照的前提
+
+- SSH 入口仍要求本地主机及合适的工作模式；实际连接需要本机 OpenSSH、有效的主机配置和远端认证。`~/.ssh/config` 缺失不是 rollout 开关失败，不会自动替用户创建连接。
+- Appshots 仍受 `configRequirements/read` 返回的 `allowAppshots` 管理策略约束。Windows 还需要官方 capture helper / transport 和 `windows_appshots_v2` 能力；缺失时保持不可用，不绕过保护。
+- 补丁保留并委托官方已有的 `overrideAdapter` 方法，不再丢弃其他 gate、experiment、layer 的覆盖。正常网络返回的非白名单配置保持原有行为。
+- 不设置生产版不支持的 Dev-only 环境覆盖，也不启用语音屏幕上下文等额外用户开关。SSH / Appshots 的 gate 核验通过不代表已完成远程登录或截图任务。
+
+### 组件诊断：MCP、插件与操控权限分开看
+
+启动核验报告新增 `components`，只读检查本地 bundled / primary-runtime 插件清单、配置启用状态和静态 `node_repl` 路径。`loaded: not-probed` 表示没有执行工具，不能用清单存在证明服务器已加载。扩展、Office 加载项与应用托管 MCP 的运行状态同样标为未探测，不以用户开关推断安装成功。
+
+可在不重启 Codex、不注入补丁、不修改配置的情况下独立诊断：
+
+```powershell
+& 'C:\实际路径\python.exe' .\runtime_diagnostics.py
+```
+
+- 官方 `codex_app` / `cua_repl` 与用户配置的 MCP 列表不是同一层；诊断不重复注册应用托管服务器。
+- 文档类 primary-runtime 插件缺失时报告 `primary-runtime-plugins-incomplete-use-official-sync`，由官方联网同步流程处理，不伪造资源或直接强制安装。
+- 静态 `node_repl` 的命令/Node/CLI 路径缺失时报告告警。普通启动会精确清理其 `env` 下的 `SKY_CUA_NATIVE_PIPE` / `SKY_CUA_NATIVE_PIPE_DIRECTORY` 会话引用，写前创建 `config.toml.bak-session-*` 备份，校验除这两项外的 TOML 数据不变；不删除 MCP 服务器或其他环境变量，不输出管道值。独立诊断和 `--verify-only` 保持只读。
+- 启动器尊重插件显式 `enabled = false`，不再将用户关闭的插件强制打开；缺失项仍按已有兼容逻辑补充。
+- 不修改认证、浏览器扩展、Office 加载项或电脑操控授权；组件告警不冒充 gate 核验失败，也不因 `passed` 被当成已解决。
 
 ### 日志与报告
 
@@ -259,6 +286,7 @@ Codex-fix/
 ├── repair-codex.cmd         # 双击检测修复入口
 ├── repair-entry.ps1         # 查找并验证 Python 环境
 ├── repair_codex.py          # 结构匹配与兼容旧版的修复工具
+├── runtime_diagnostics.py   # 组件只读诊断与精确会话配置清理
 ├── assets/                 # 快捷方式图标
 └── tools/                  # 自动化测试与调试工具
 ```

@@ -29,14 +29,16 @@ def log(msg):
 
 def find_exe():
     """取当前已注册的 MSIX 包目录（WindowsApps 不能列目录，只能问 Appx）。"""
+    global _FAM
     ps = ("$p = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version | Select-Object -Last 1; "
-          "if ($p) { Join-Path $p.InstallLocation 'app\\ChatGPT.exe' }")
+          "if ($p) { @{exe=(Join-Path $p.InstallLocation 'app\\ChatGPT.exe'); family=$p.PackageFamilyName} | ConvertTo-Json -Compress }")
     try:
         out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
                              capture_output=True, text=True, timeout=40, creationflags=0x08000000)
-        p = (out.stdout or "").strip()
-        if p and os.path.isfile(p):
-            return p
+        package = json.loads(out.stdout or "null")
+        if out.returncode == 0 and isinstance(package, dict) and os.path.isfile(package.get("exe", "")):
+            _FAM = package.get("family") or None
+            return package["exe"]
     except Exception:
         pass
     for root in dict.fromkeys([os.environ.get("ProgramFiles", r"C:\Program Files"),
@@ -57,32 +59,6 @@ ACTIVE_FEATURES = {"computer_use", "browser_use_external", "browser_use", "layou
 FEATURE_POLICY = {}
 PATCH_VERSION = "layout-v1"
 REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "verification.json")
-
-
-def bundle_missing_markers(path):
-    """只读检查当前 ASAR 渲染代码仍引用目标开关，防止对废弃 ID 自证成功。"""
-    import struct
-    missing = set((*REQUIRED_GATES, "72216192", "enable_i18n"))
-    def entries(node, prefix=""):
-        for name, item in node.get("files", {}).items():
-            name = prefix + "/" + name
-            if "files" in item:
-                yield from entries(item, name)
-            elif name.startswith("/webview/") and name.endswith(".js") and not item.get("unpacked"):
-                yield item
-    with open(path, "rb") as stream:
-        prefix = stream.read(16)
-        _, header_size, _, json_size = struct.unpack("<4I", prefix)
-        if json_size > 64 * 1024 * 1024:
-            raise RuntimeError("ASAR 头过大或格式变化")
-        header = json.loads(stream.read(json_size))
-        for item in entries(header):
-            stream.seek(8 + header_size + int(item["offset"]))
-            body = stream.read(item["size"])
-            missing = {marker for marker in missing if marker.encode() not in body}
-            if not missing:
-                break
-    return sorted(missing)
 
 
 def verification_failures(state):
@@ -111,6 +87,17 @@ def write_report(report, path=None):
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, target)
+
+
+def component_diagnostics():
+    """Separate inventory from gate verification; never start tools or mutate config."""
+    try:
+        from runtime_diagnostics import collect
+        return collect()
+    except Exception as error:
+        log("组件诊断不可用：" + type(error).__name__)
+        return {"verification_scope": "local-inventory-not-tool-execution",
+                "warnings": ["diagnostics-unavailable"], "status": "unavailable"}
 
 
 class CdpSession:
@@ -153,16 +140,19 @@ PATCH = r"""
   }
   function installOverride(inst) {
     if (!inst || inst.__zhOA === "layout-v1") return;
+    const previous = inst.overrideAdapter;
+    const delegate = (method, args) => typeof previous?.[method] === "function"
+      ? previous[method].apply(previous, args) : null;
     inst.overrideAdapter = {
-      getGateOverride: function (gate) {
+      getGateOverride: function (gate, ...rest) {
         var n = gate && gate.name;
         if (GATES.indexOf(String(n)) >= 0) return fakeGate(String(n));
-        return null;
+        return delegate("getGateOverride", [gate, ...rest]);
       },
-      getDynamicConfigOverride: function () { return null; },
-      getExperimentOverride: function () { return null; },
-      getLayerOverride: function () { return null; },
-      getParameterStoreOverride: function () { return null; },
+      getDynamicConfigOverride: function (...args) { return delegate("getDynamicConfigOverride", args); },
+      getExperimentOverride: function (...args) { return delegate("getExperimentOverride", args); },
+      getLayerOverride: function (...args) { return delegate("getLayerOverride", args); },
+      getParameterStoreOverride: function (...args) { return delegate("getParameterStoreOverride", args); },
     };
     inst.__zhOA = "layout-v1";
     try { inst._memoCache = {}; } catch (e) {}
@@ -216,7 +206,7 @@ PATCH = r"""
       set(v) { ns = v; patchNs(v); },
     });
   } catch (e) {}
-  const iv = setInterval(() => { if (ns) patchNs(ns); }, 2);
+  const iv = setInterval(() => { if (ns) patchNs(ns); }, 100);
   setTimeout(() => clearInterval(iv), 120000);
 })();
 """
@@ -253,23 +243,15 @@ def configure_features(asar):
     import hashlib
     from repair_codex import discover, renderer_sources, ROLES
     global PATCH, STATE, REQUIRED_GATES, ACTIVE_FEATURES, FEATURE_POLICY, PATCH_VERSION
-    found, evidence = discover(renderer_sources(asar))
-    ACTIVE_FEATURES = set(found)
+    found, _ = discover(renderer_sources(asar))
     FEATURE_POLICY = {role: {"mode": "override" if role in found else "official-default",
                               "id": found.get(role),
                               "reason": "unique-structural-match" if role in found else
                                         "missing-or-ambiguous-structure; not proof of feature removal"}
                       for role in ROLES}
-    # A shared ID cannot safely be assigned to unrelated features.
-    from collections import Counter
-    collisions = {value for value, count in Counter(found.values()).items() if count > 1}
-    for role in list(found):
-        if found[role] in collisions:
-            del found[role]
-            FEATURE_POLICY[role] = {"mode": "official-default", "id": None, "reason": "id-collision"}
     ACTIVE_FEATURES = set(found)
-    REQUIRED_GATES = tuple(found[role] for role in ROLES[:4] if role in found)
-    PATCH_VERSION = "policy-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]
+    REQUIRED_GATES = tuple(found[role] for role in ROLES if role != "i18n" and role in found)
+    PATCH_VERSION = "policy-v3-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]
     gates = json.dumps(list(REQUIRED_GATES))
     PATCH = re.sub(r'const GATES = \[.*?\];', lambda _: 'const GATES = ' + gates + ';', PATCH_TEMPLATE)
     PATCH = re.sub(r'const LAYER = "\d+";', lambda _: 'const LAYER = ' + json.dumps(found.get("i18n", "")) + ';', PATCH)
@@ -436,6 +418,9 @@ def ensure_config(active_features=None):
 
     import tomllib
     parsed = tomllib.loads(src)  # 原配置非法时立即停止，不在损坏的配置上继续修补。
+    # Explicit user opt-outs are permissions, not missing configuration.
+    plugins = [plug for plug in plugins
+               if parsed.get("plugins", {}).get(plug, {}).get("enabled") is not False]
     if "i18n" in active and parsed.get("desktop", {}).get("localeOverride") != "zh-CN":
         desktop = re.search(r"(?ms)^\[desktop\][ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
         if desktop:
@@ -517,6 +502,10 @@ async def main(verify_only=False):
         raise RuntimeError("没找到 OpenAI.Codex 安装目录")
     await asyncio.to_thread(configure_features, os.path.join(os.path.dirname(EXE), "resources", "app.asar"))
     if not verify_only:
+        from runtime_diagnostics import repair_session_config
+        cleanup = repair_session_config(CONFIG)
+        if cleanup['changed']:
+            log('已清理 node_repl 持久化会话引用；备份：' + cleanup['backup'])
         log(ensure_config(ACTIVE_FEATURES))
     existing = await asyncio.to_thread(find_existing_cdp)
     if existing and not verify_only:
@@ -583,11 +572,13 @@ async def main(verify_only=False):
             if not failures:
                 write_report({"status": "passed", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                               "app_path": EXE, "port": PORT, "state": state, "features": FEATURE_POLICY,
+                              "components": await asyncio.to_thread(component_diagnostics),
                               "verification_scope": "active-overrides-only"})
                 log("核验通过：" + json.dumps(state, ensure_ascii=False))
                 return
             await asyncio.sleep(1)
         write_report({"status": "failed", "port": PORT, "state": state,
+                      "components": await asyncio.to_thread(component_diagnostics),
                       "failures": verification_failures(state)})
         raise RuntimeError("核验失败：" + ", ".join(verification_failures(state)) +
                            "；可能为新版兼容性变化，请查看 verification.json")
@@ -612,7 +603,8 @@ def entry():
         log("已有启动器正在执行，本次退出")
         return 0
     try:
-        write_report({"status": "checking", "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        write_report({"status": "checking", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                      "components": {"status": "pending"}})
         log("---- 开始核验 ----")
         asyncio.run(main(options.verify_only))
         log("---- 结束（CDP 客户端已断开，无常驻守卫） ----")

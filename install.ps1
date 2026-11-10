@@ -17,7 +17,7 @@ $ico = Join-Path $dir 'assets\codex.ico'
 $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
 $appUserModelId = 'OpenAI.Codex_2p2nqsd0c76g0!App'
 
-foreach ($f in @($vbs, $ico)) {
+foreach ($f in @($vbs, $ico, (Join-Path $dir 'codex_zh_launch.py'), (Join-Path $dir 'repair_codex.py'), (Join-Path $dir 'runtime_diagnostics.py'), (Join-Path $dir 'activate_codex.py'))) {
     if (-not (Test-Path -LiteralPath $f)) { throw "缺少文件: $f" }
 }
 

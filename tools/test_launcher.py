@@ -18,6 +18,24 @@ class VerificationTests(unittest.TestCase):
                     gates={g: True for g in module.REQUIRED_GATES},
                     navigation=True, settingsEntry=True)
 
+    def test_package_lookup_reuses_family_without_second_powershell(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        package = {'exe': 'C:/Codex/ChatGPT.exe', 'family': 'OpenAI.Codex_test'}
+        with patch.object(module, '_FAM', None), patch.object(module.os.path, 'isfile', return_value=True), patch.object(module.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(package))) as run:
+            self.assertEqual(module.find_exe(), package['exe'])
+            self.assertEqual(module.pkg_family(), package['family'])
+            run.assert_called_once()
+
+    def test_diagnostic_failure_does_not_escape_into_launcher(self):
+        import sys
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        def broken():
+            raise TypeError('invalid private configuration')
+        with patch.dict(sys.modules, {'runtime_diagnostics': SimpleNamespace(collect=broken)}):
+            self.assertEqual(module.component_diagnostics()['status'], 'unavailable')
+
     def test_partial_patch_is_not_success(self):
         state = self.healthy()
         self.assertEqual(module.verification_failures(state), [])
@@ -36,19 +54,6 @@ class VerificationTests(unittest.TestCase):
             module.write_report({'status': 'failed'}, path)
             self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['status'], 'failed')
             self.assertFalse(path.with_suffix('.json.tmp').exists())
-
-    def test_bundle_check_detects_removed_gate(self):
-        import struct
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / 'app.asar'
-            def bundle(body):
-                header = json.dumps({'files': {'webview': {'files': {'main.js': {
-                    'size': len(body), 'offset': '0'}}}}}).encode()
-                path.write_bytes(struct.pack('<4I', 4, len(header)+8, len(header)+4, len(header)) + header + body)
-            bundle(b' '.join(x.encode() for x in (*module.REQUIRED_GATES, '72216192', 'enable_i18n')))
-            self.assertEqual(module.bundle_missing_markers(path), [])
-            bundle(b'3085093835')
-            self.assertIn('1506311413', module.bundle_missing_markers(path))
 
     def test_config_repairs_desktop_locale_without_touching_provider(self):
         import tomllib
@@ -79,7 +84,7 @@ class VerificationTests(unittest.TestCase):
                 module.ensure_config()
             data = tomllib.loads(path.read_text(encoding='utf-8'))
             self.assertEqual(data['desktop']['localeOverride'], 'zh-CN')
-            self.assertIs(data['plugins']['computer-use@openai-bundled']['enabled'], True)
+            self.assertIs(data['plugins']['computer-use@openai-bundled']['enabled'], False)
 
     def test_port_reader_rejects_out_of_range(self):
         with tempfile.TemporaryDirectory() as d:

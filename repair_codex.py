@@ -14,7 +14,8 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent
-ROLES = ('computer_use', 'browser_use_external', 'browser_use', 'layout', 'i18n')
+ROLES = ('computer_use', 'browser_use_external', 'browser_use', 'layout', 'i18n',
+         'ssh', 'appshots', 'appshots_windows')
 
 
 def renderer_sources(path):
@@ -41,6 +42,21 @@ def renderer_sources(path):
             yield name, body.decode('utf-8')
 
 
+def anchored_matches(pattern, text, anchor, before, after):
+    """Search bounded semantic neighborhoods, retaining original offsets."""
+    start = 0
+    seen = set()
+    while (position := text.find(anchor, start)) >= 0:
+        left = max(0, position - before)
+        right = min(len(text), position + len(anchor) + after)
+        for match in re.finditer(pattern, text[left:right]):
+            offset = left + match.start()
+            if offset not in seen:
+                seen.add(offset)
+                yield match, offset
+        start = position + len(anchor)
+
+
 def discover(sources):
     """Match multiple semantic anchors, not minified module/variable names.
 
@@ -51,7 +67,10 @@ def discover(sources):
     ident = r'[A-Za-z_$][\w$]*'
     call = rf'\(0,{ident}\.{ident}\)\("(\d+)"\)'
     for filename, text in sources:
+        # Cheap semantic anchors avoid running broad regexes over unrelated chunks.
         for role in ROLES[:3]:
+            if 'featureName:"' + role + '"' not in text:
+                continue
             # Current renderer: gate read immediately before memo bookkeeping
             # and the corresponding featureName. Never use nearest arbitrary ID.
             pattern = call + r'[^;]{0,240}?;[^;]{0,240}?featureName:"' + role + '"'
@@ -66,8 +85,22 @@ def discover(sources):
         for match in re.finditer(guard, text):
             gate = match.group(1)
             selector = rf'{ident}=\(0,{ident}\.{ident}\)\({ident}\.{ident},\(\{{get:{ident}\}}\)=>{ident}\({ident}\.{ident},"{gate}"\)\).{{0,1100}}?return"legacy";.{{0,300}}?return"rail-only"'
-            if re.search(selector, text):
+            if any(anchored_matches(selector, text, 'return"rail-only"', 2400, 40)):
                 evidence['layout'].append({'id': gate, 'file': filename, 'offset': match.start()})
+        # Bind the rollout read to the SSH config OR chain, not a nearby ID.
+        ssh = (rf'({ident})=({ident})\({ident}\.JW,"(\d+)"\);'
+               rf'if\(!0===({ident})\?\.config\["features\.remote_connections"\]\)return!0;'
+               rf'let ({ident})=\4\?\.config\.features;return null==\5\|\|"object"!=typeof \5\|\|'
+               rf'Array\.isArray\(\5\)\?\1:Object\.getOwnPropertyDescriptor\(\5,"remote_connections"\)\?\.value===!0\|\|\1')
+        for match, offset in anchored_matches(ssh, text, 'features.remote_connections', 800, 1000):
+            evidence['ssh'].append({'id': match.group(3), 'file': filename, 'offset': offset})
+        # Keep allowAppshots and native-supported checks in the vendor code.
+        appshots = (rf'if\(!{ident}\(({ident})\)\|\|!({ident})\(({ident})\.JW,"(\d+)"\)'
+                    rf'\|\|"windows"===\1&&!\2\(\3\.JW,"(\d+)"\)\)return!1;'
+                    rf'.{{0,260}}?allowAppshots!==!1')
+        for match, offset in anchored_matches(appshots, text, 'allowAppshots!==!1', 1000, 50):
+            for role, group in [('appshots', 4), ('appshots_windows', 5)]:
+                evidence[role].append({'id': match.group(group), 'file': filename, 'offset': offset})
     found = {}
     for role, rows in evidence.items():
         ids = {row['id'] for row in rows}
@@ -97,10 +130,10 @@ def current_ids(source):
 
 def updated_source(source, found):
     old = current_ids(source)
-    if set(found) != set(ROLES) or len(set(found.values())) != 5:
+    if set(found) != set(ROLES[:5]) or len(set(found.values())) != 5:
         raise ValueError('Missing, ambiguous or colliding feature IDs; refusing modification')
     # One simultaneous replacement prevents overlapping old/new ID collisions.
-    mapping = {old[role]: found[role] for role in ROLES}
+    mapping = {old[role]: found[role] for role in ROLES[:5]}
     pattern = r'(["\'])(' + '|'.join(re.escape(x) for x in mapping) + r')\1'
     result = re.sub(pattern, lambda m: m[1] + mapping[m[2]] + m[1], source)
     if result != source:
@@ -146,9 +179,10 @@ def run(args):
             after = before
         else:
             # Compatibility for older launchers remains fail-closed.
-            if set(found) != set(ROLES):
+            legacy_found = {role: found[role] for role in ROLES[:5] if role in found}
+            if set(legacy_found) != set(ROLES[:5]):
                 raise RuntimeError('旧版启动器不支持逐项回退，请先升级项目。')
-            after = updated_source(source, found).encode('utf-8')
+            after = updated_source(source, legacy_found).encode('utf-8')
         report['changed'] = after != before
         print(json.dumps({'previous': report['previous'], 'detected': found, 'changed': report['changed']}, ensure_ascii=False, indent=2))
         if args.scan_only:
