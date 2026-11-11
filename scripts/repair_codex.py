@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 ROLES = ('computer_use', 'browser_use_external', 'browser_use', 'layout', 'i18n',
-         'ssh', 'appshots', 'appshots_windows')
+         'ssh', 'appshots', 'appshots_windows', 'toys', 'dictation', 'dictation_global', 'pets_layout')
 
 
 def renderer_sources(path):
@@ -55,6 +55,31 @@ def anchored_matches(pattern, text, anchor, before, after):
                 seen.add(offset)
                 yield match, offset
         start = position + len(anchor)
+
+
+def component_body(text, name):
+    """Resolve one named declaration, respecting braces in strings/comments.
+
+    Duplicate declarations in a chunk are ambiguous (never guess module scope).
+    Non-comment slashes (regex or division) are deliberately unsupported: without
+    a full JS lexer their braces could cross function boundaries. Fail closed.
+    """
+    declarations = list(re.finditer(r'\bfunction ' + re.escape(name) + r'\([^()]*\)\{', text))
+    if len(declarations) != 1:
+        return ''
+    start = declarations[0].end()
+    token = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|/\*[\s\S]*?\*/|//[^\n]*|[{}/]''')
+    depth = 1
+    for match in token.finditer(text, start):
+        if match[0] == '/':
+            return ''
+        if match[0] == '{':
+            depth += 1
+        elif match[0] == '}':
+            depth -= 1
+            if not depth:
+                return text[start:match.start()]
+    return ''
 
 
 def discover(sources):
@@ -101,6 +126,57 @@ def discover(sources):
         for match, offset in anchored_matches(appshots, text, 'allowAppshots!==!1', 1000, 50):
             for role, group in [('appshots', 4), ('appshots_windows', 5)]:
                 evidence[role].append({'id': match.group(group), 'file': filename, 'offset': offset})
+        toys = (r'toys:\{statsig:\["(\d+)"\],supportedClients:\["electron"\],children:\{'
+                rf'"toys.audio-visualizer":\{{settings:\[{ident}\.{ident}\.audioVisualizerEnabled\.key\]\}},'
+                rf'"toys.confetti":\{{settings:\[{ident}\.{ident}\.confettiEnabled\.key\]\}}\}}\}}')
+        for match, offset in anchored_matches(toys, text, '"toys.confetti"', 450, 150):
+            evidence['toys'].append({'id': match.group(1), 'file': filename, 'offset': offset})
+        # This is a dual-layout gate, not a settings-entry or visibility gate.
+        # Resolve BOTH selected components and their shared pet collection.
+        if '"settings.pets.visibility"' in text and '"settings.mini.show"' in text:
+            bodies = {}
+            def body(name):
+                if name not in bodies:
+                    bodies[name] = component_body(text, name)
+                return bodies[name]
+            jsx = rf'\(0,{ident}\.jsxs?\)\(({ident}),\{{'
+            selector = (r'function ' + ident + r'\(\)\{return' + call +
+                        rf'\?\(0,{ident}\.jsx\)\(({ident}),\{{\}}\)'
+                        rf':\(0,{ident}\.jsx\)\(({ident}),\{{\}}\)\}}')
+            for match in re.finditer(selector, text):
+                new = body(match.group(2))
+                old = body(match.group(3))
+                if '"settings.pets.visibility"' not in new or 'slug:"pets"' not in old:
+                    continue
+                new_refs = set(re.findall(jsx, new))
+                old_refs = set(re.findall(jsx, old))
+                collections = [name for name in new_refs & old_refs
+                               if all(marker in body(name)
+                                      for marker in ('collectionSection:', 'onCreateStart:', 'onCreateCloudPet:'))]
+                actions = [body(name) for name in new_refs - old_refs]
+                if len(collections) != 1 or not any('"settings.mini.show"' in body and
+                                                       '"settings.mini.hide"' in body for body in actions):
+                    continue
+                evidence['pets_layout'].append({'id': match.group(1), 'file': filename,
+                                                'offset': match.start(),
+                                                'new_component': match.group(2),
+                                                'old_component': match.group(3),
+                                                'collection_component': collections[0]})
+        # Composer rollout: bind loading/value reads, media support and ChatGPT auth.
+        # Require independent agreement with the named global capability's first gate.
+        media = (rf'if\(!navigator\?\.mediaDevices\?\.getUserMedia\|\|"u"<typeof MediaRecorder\)'
+                 rf'return\{{isLoading:!1,isError:!1,isCapable:!1\}};let ({ident})=({ident})\(({ident})\.{ident},"(\d+)"\),'
+                 rf'({ident})=\2\(\3\.{ident},"\4"\),\{{authLoading:({ident}),authMethod:({ident})\}}=\2\({ident}\.{ident}\),'
+                 rf'({ident})=\6\|\|\1;return\{{isLoading:\8,isError:!1,isCapable:!\8&&\5&&"chatgpt"===\7\}}')
+        global_dictation = r'"dictation.global":\{accessPolicy:"global-dictation",statsig:\["(\d+)","(\d+)"\],supportedClients:\["electron"\]\}'
+        capabilities = None
+        for match, offset in anchored_matches(media, text, 'getUserMedia', 30, 650):
+            if capabilities is None:
+                capabilities = list(anchored_matches(global_dictation, text, '"dictation.global"', 0, 220))
+            for capability, _ in capabilities:
+                if match.group(4) == capability.group(1):
+                    for role, gate in [('dictation', match.group(4)), ('dictation_global', capability.group(2))]:
+                        evidence[role].append({'id': gate, 'file': filename, 'offset': offset})
     found = {}
     for role, rows in evidence.items():
         ids = {row['id'] for row in rows}
@@ -110,6 +186,8 @@ def discover(sources):
     from collections import Counter
     counts = Counter(found.values())
     found = {role: value for role, value in found.items() if counts[value] == 1}
+    if 'dictation' not in found:
+        found.pop('dictation_global', None)
     return found, evidence
 
 
