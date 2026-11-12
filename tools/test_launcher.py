@@ -86,6 +86,18 @@ class VerificationTests(unittest.TestCase):
             self.assertEqual(data['desktop']['localeOverride'], 'zh-CN')
             self.assertIs(data['plugins']['computer-use@openai-bundled']['enabled'], False)
 
+    def test_target_selection_rejects_other_pages_and_requires_debug_socket(self):
+        from unittest.mock import patch
+        from io import BytesIO
+        targets = [
+            {'type': 'page', 'url': 'https://example.invalid', 'webSocketDebuggerUrl': 'wrong'},
+            {'type': 'webview', 'url': 'app://-/index.html', 'webSocketDebuggerUrl': 'wrong'},
+            {'type': 'page', 'url': 'app://-/index.html'},
+            {'type': 'page', 'url': 'app://-/index.html', 'webSocketDebuggerUrl': 'ws://127.0.0.1/actual'},
+        ]
+        with patch.object(module.urllib.request, 'urlopen', return_value=BytesIO(json.dumps(targets).encode())):
+            self.assertEqual(module.page_ws(1234), 'ws://127.0.0.1/actual')
+
     def test_port_reader_rejects_out_of_range(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'port'
@@ -108,6 +120,13 @@ class RpcTests(unittest.IsolatedAsyncioTestCase):
         ws = Socket([{'id': 1, 'error': {'code': -1, 'message': 'unsupported'}}])
         with self.assertRaisesRegex(RuntimeError, 'unsupported'):
             await module.CdpSession(ws).call('Page.enable')
+
+    async def test_page_wait_stops_when_app_exits(self):
+        from unittest.mock import patch
+        with patch.object(module, 'page_ws', return_value=None), patch.object(module, 'codex_running', return_value=False):
+            self.assertTrue(hasattr(module, 'wait_for_page'), 'bounded page wait is missing')
+            with self.assertRaisesRegex(RuntimeError, '配置|退出'):
+                await module.wait_for_page(timeout=1)
 
     async def test_rpc_rejects_javascript_exceptions(self):
         class Socket:

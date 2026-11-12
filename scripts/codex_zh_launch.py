@@ -280,9 +280,7 @@ def configure_features(asar):
     return FEATURE_POLICY
 
 
-def http_json(path, timeout=2):
-    with urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}", timeout=timeout) as r:
-        return json.load(r)
+
 
 
 def cdp_alive(port, timeout=1.0):
@@ -333,14 +331,7 @@ def read_devtools_port(path):
         return None
 
 
-def has_app_page(port, timeout=1.0):
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=timeout) as r:
-            targets = json.load(r)
-        return any(t.get("type") == "page" and t.get("url", "").startswith("app://")
-                   for t in targets)
-    except Exception:
-        return False
+
 
 
 def find_existing_cdp():
@@ -361,7 +352,7 @@ def find_existing_cdp():
         if p in seen:
             continue
         seen.add(p)
-        if has_app_page(p):
+        if page_ws(p):
             return p
     return None
 
@@ -374,14 +365,20 @@ def save_port(p):
         pass
 
 
-def page_ws():
+def page_ws(port=None):
     try:
-        targets = http_json("/json/list")
+        selected = PORT if port is None else port
+        with urllib.request.urlopen(f"http://127.0.0.1:{selected}/json/list", timeout=1) as response:
+            targets = json.load(response)
     except Exception:
         return None
-    for t in targets:
-        if t.get("type") == "page" and t.get("url", "").startswith("app://"):
-            return t["webSocketDebuggerUrl"]
+    if not isinstance(targets, list):
+        return None
+    for target in targets:
+        if (isinstance(target, dict) and target.get("type") == "page"
+                and str(target.get("url", "")).startswith("app://")
+                and isinstance(target.get("webSocketDebuggerUrl"), str)):
+            return target["webSocketDebuggerUrl"]
     return None
 
 
@@ -511,6 +508,19 @@ def spawn_app():
     return "popen"
 
 
+async def wait_for_page(timeout=120):
+    """Bound startup by wall time, and stop if the application has exited."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        url = await asyncio.to_thread(page_ws)
+        if url:
+            return url
+        if not await asyncio.to_thread(codex_running):
+            raise RuntimeError('Codex 在页面创建前退出。请检查配置和最新应用日志；WSL 模式尤其需检查模型目录路径。')
+        await asyncio.sleep(0.5)
+    raise RuntimeError('Codex 仍在运行，但未在限定时间内创建 app:// 页面。请检查最新应用日志。')
+
+
 async def main(verify_only=False):
     global PORT, EXE
     EXE = await asyncio.to_thread(find_exe)
@@ -518,6 +528,10 @@ async def main(verify_only=False):
         raise RuntimeError("没找到 OpenAI.Codex 安装目录")
     await asyncio.to_thread(configure_features, os.path.join(os.path.dirname(EXE), "resources", "app.asar"))
     if not verify_only:
+        from startup_health import repair_catalog_path
+        catalog = repair_catalog_path(CONFIG, BACKUP_DIR)
+        if catalog['changed']:
+            log('已将模型目录改为 CODEX_HOME 相对路径（兼容原生/WSL）；备份：' + catalog['backup'])
         from runtime_diagnostics import repair_session_config
         cleanup = repair_session_config(CONFIG)
         if cleanup['changed']:
@@ -566,14 +580,7 @@ async def main(verify_only=False):
         if not PORT:
             raise RuntimeError("120 秒内未找到真实调试端口；不再猜测未监听的固定端口")
     save_port(PORT)
-    url = None
-    for _ in range(200):
-        url = await asyncio.to_thread(page_ws)
-        if url:
-            break
-        await asyncio.sleep(0.2)
-    if not url:
-        raise RuntimeError("找不到 Codex 页面目标")
+    url = await wait_for_page()
     async with websockets.connect(url, max_size=64 * 1024 * 1024, close_timeout=3) as ws:
         rpc = CdpSession(ws)
         await rpc.call("Page.enable")
