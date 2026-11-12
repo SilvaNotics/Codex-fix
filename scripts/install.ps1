@@ -21,6 +21,9 @@ foreach ($f in @($vbs, $ico, (Join-Path $dir 'codex_zh_launch.py'), (Join-Path $
     if (-not (Test-Path -LiteralPath $f)) { throw "缺少文件: $f" }
 }
 
+# Census is read-only for Codex; failure keeps shortcut installation usable.
+& (Join-Path $dir 'census-entry.ps1')
+
 $shell = New-Object -ComObject WScript.Shell
 
 # 给 .lnk 写 System.AppUserModel.ID。

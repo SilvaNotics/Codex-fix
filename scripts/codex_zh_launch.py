@@ -245,11 +245,14 @@ STATE_TEMPLATE = STATE
 
 
 def configure_features(asar):
-    """Rediscover every launch; unsupported/ambiguous roles pass through to vendor defaults."""
+    """Use matching persisted policy, otherwise rediscover supported roles."""
     import hashlib
     from repair_codex import discover, renderer_sources, ROLES
     global PATCH, STATE, REQUIRED_GATES, ACTIVE_FEATURES, FEATURE_POLICY, PATCH_VERSION
-    found, _ = discover(renderer_sources(asar))
+    from feature_census import load_policy
+    found = load_policy(asar)
+    if found is None:
+        found, _ = discover(renderer_sources(asar))
     FEATURE_POLICY = {role: {"mode": "override" if role in found else "official-default",
                               "id": found.get(role),
                               "reason": "unique-structural-match" if role in found else
