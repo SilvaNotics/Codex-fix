@@ -51,7 +51,7 @@ def digest(value):
 
 def scanner_fingerprint():
     return digest({name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-                   for name in ('feature_census.py', 'census_ast.cjs', 'ui_rollouts.py', 'reviewed_features.py', 'repair_codex.py', 'vendor/acorn.cjs')})
+                   for name in ('feature_census.py', 'census_ast.cjs', 'ui_rollouts.py', 'trajectory_rollout.py', 'reviewed_features.py', 'repair_codex.py', 'vendor/acorn.cjs')})
 
 
 def package_identity(asar):
@@ -116,7 +116,8 @@ def load_policy(asar, cache=CACHE):
         from repair_codex import ROLES
         from reviewed_features import APPROVED
         from ui_rollouts import PARAMETERS
-        allowed = set(ROLES) | {'feature:' + name for name in APPROVED} | {'layer:' + name for name in PARAMETERS}
+        from trajectory_rollout import ROLE as TRAJECTORY_ROLE
+        allowed = set(ROLES) | {TRAJECTORY_ROLE} | {'feature:' + name for name in APPROVED} | {'layer:' + name for name in PARAMETERS}
         if not isinstance(found, dict) or any(k not in allowed or not isinstance(v, str) or not v.isdecimal() for k,v in found.items()):
             return None
         gate_values = [v for k,v in found.items() if not k.startswith('layer:')]
@@ -160,10 +161,14 @@ def refresh(asar, cache=CACHE, node=None):
         raise ValueError('Incomplete AST census; previous snapshot preserved: ' + json.dumps(errors[:5]))
     from reviewed_features import review_candidates
     additional, review_audit = review_candidates(rows)
-    combined = dict(found, **additional)
+    from trajectory_rollout import discover as discover_trajectory
+    trajectory, trajectory_audit = discover_trajectory(renderer_sources(asar), node)
+    combined = dict(found, **additional, **trajectory)
     from collections import Counter
     counts = Counter(combined.values())
     found = {role: gate for role, gate in combined.items() if counts[gate] == 1}
+    if trajectory and not set(trajectory).issubset(found):
+        trajectory_audit.update(decision='hold', reason='gate-ID-collision')
     from ui_rollouts import reviewed_layers
     found.update(reviewed_layers(rows))
     for audit in review_audit:
@@ -189,7 +194,7 @@ def refresh(asar, cache=CACHE, node=None):
             'policy': {'found': found, 'features': {role: {'id': found.get(role),
                       'mode': 'override' if role in found else 'official-default',
                       'reason': 'unique-supported-structural-rule' if role in found else 'missing-ambiguous-or-colliding-supported-rule'} for role in ROLES},
-                       'evidence': evidence, 'review': review_audit},
+                       'evidence': evidence, 'review': review_audit, 'trajectory_review': trajectory_audit},
             'census': {'scope': 'all ASAR packed/unpacked JavaScript; no dataflow/alias resolution; SDK-named calls are candidates, not proven SDK receivers',
                        'offset_unit': 'UTF-16 code units (AST); supported-rule evidence uses Python code points',
                        'source_count': source_count, 'rows': rows, 'errors': errors,

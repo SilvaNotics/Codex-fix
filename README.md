@@ -28,7 +28,7 @@
 
 新增学习卡片 layer `3972672161` 的两个参数级覆盖：`enable_suggested_followups`、`enable_thumbnail_asset`。Acorn 在同一函数体内确认 layer.get(false) 与已有学习卡片数据、列表裁剪/缩略图键、渲染消费者的关联；不是跨函数寻找最近数字。只覆盖这两个参数，其他参数继续透传。真实运行读取两项均为 true、无关参数仍为 false；未生成卡片内容或伪造追问数据，尚未验证具体卡片呈现。
 
-审查拒绝 `2929582856`：该 gate 的 true 分支是版本停用页面，而不是新增功能。对话轨迹 `1527462160` 已定位为正向候选，尚未接入本轮策略；Spaces 模板、执行位置选择器、Daybreak 与 Drive Sync 声明保留进一步审查，不以双 JSX 为充分依据。
+审查拒绝 `2929582856`：该 gate 的 true 分支是版本停用页面，而不是新增功能。对话轨迹 `1527462160` 已接入初始化策略：完整 AST 模板验证 capability builder/evaluator、模块导出导入及实际 chat-refresh Context 消费者，保留原 mode/activity 与能力约束；真实运行 gate 为 true，具体对话呈现未做端到端验收。Guardian 实测 SDK 有 values，但官方用户缓存匹配失败、publication.hasEvaluations=false；报告单列 `official-evaluations-rejected-current-user-cache-mismatch`，不是菜单启用成功。Spaces 模板、执行位置选择器、Daybreak 与 Drive Sync 声明保留进一步审查，不以双 JSX 为充分依据。
 
 ## 1. 功能与限制
 

@@ -631,7 +631,16 @@ async def main(verify_only=False):
             state = json.loads(await rpc.evaluate(STATE) or "{}")
             failures = verification_failures(state)
             if not failures:
+                from guardian_runtime import DIAGNOSTIC_JS, classify
+                try:
+                    diagnostic = await rpc.call('Runtime.evaluate', {'expression': DIAGNOSTIC_JS,
+                        'returnByValue': True, 'awaitPromise': True, 'timeout': 5000})
+                    raw = diagnostic.get('result', {}).get('value')
+                    guardian = classify(raw) if isinstance(raw, dict) else {'status':'unavailable','risk_review_service':'not-probed'}
+                except Exception:
+                    guardian = {'status':'unavailable','risk_review_service':'not-probed'}
                 write_report({"status": "passed", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                              "guardian": guardian,
                               "app_path": EXE, "port": PORT, "state": state, "features": FEATURE_POLICY,
                               "components": await asyncio.to_thread(component_diagnostics),
                               "verification_scope": "active-overrides-only"})
