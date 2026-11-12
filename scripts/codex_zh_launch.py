@@ -252,7 +252,10 @@ def configure_features(asar):
     from feature_census import load_policy
     found = load_policy(asar)
     if found is None:
+        log('普查策略不存在或指纹已变化，回退当前安装包的已支持规则扫描')
         found, _ = discover(renderer_sources(asar))
+    else:
+        log('已读取匹配当前安装包与扫描器指纹的普查策略')
     FEATURE_POLICY = {role: {"mode": "override" if role in found else "official-default",
                               "id": found.get(role),
                               "reason": "unique-structural-match" if role in found else

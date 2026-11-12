@@ -62,7 +62,24 @@ c["getLayer"]("layer");c.getExperiment(`literal`);c.getDynamicConfig("cfg");
         self.assertIn('census-entry.ps1', install)
         self.assertLess(install.index('census-entry.ps1'), install.index("$shell ="))
         self.assertIn('feature_census.py', repair)
-        self.assertLess(repair.index('feature_census.py'), repair.index("& $python (Join-Path $PSScriptRoot 'repair_codex.py')"))
+        self.assertNotIn("& $python (Join-Path $PSScriptRoot 'repair_codex.py')", repair)
+        self.assertNotIn('codex_zh_launch.py', repair)
+        self.assertIn('exit $LASTEXITCODE', repair)
+
+    def test_parse_failure_preserves_valid_snapshot(self):
+        import tempfile
+        import feature_census as census
+        with tempfile.TemporaryDirectory() as folder:
+            asar = Path(folder)/'app.asar'
+            cache = Path(folder)/'policy.json'
+            write_asar(asar, {'main.js': 'c.checkGate("123");'})
+            census.refresh(asar, cache)
+            before = cache.read_bytes()
+            write_asar(asar, {'main.js': 'const = ;'})
+            with self.assertRaisesRegex(ValueError, 'Incomplete AST census'):
+                census.refresh(asar, cache)
+            self.assertEqual(cache.read_bytes(), before)
+            self.assertIsNone(census.load_policy(asar, cache))
 
     def test_policy_is_fingerprinted_fail_closed_and_preserves_previous_on_failure(self):
         import tempfile

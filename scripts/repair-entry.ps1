@@ -19,9 +19,9 @@ if (!$python) {
     exit 1
 }
 Write-Host "Python: $python"
-Write-Host 'Scanning the installed Codex. If necessary, the launcher may restart Codex. Do not run during an active task.'
+Write-Host 'Scanning the installed Codex and writing the census/policy. Open Codex through its shortcut afterwards.'
 $env:PYTHONUTF8 = '1'
 & $python (Join-Path $PSScriptRoot 'feature_census.py')
 if ($LASTEXITCODE -ne 0) { Write-Warning 'Census failed; previous snapshot preserved. Current supported discovery will be used if needed.' }
-& $python (Join-Path $PSScriptRoot 'repair_codex.py')
+
 exit $LASTEXITCODE

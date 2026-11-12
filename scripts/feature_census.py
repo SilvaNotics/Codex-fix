@@ -134,15 +134,22 @@ def refresh(asar, cache=CACHE, node=None):
     """One atomic snapshot contains census AND resolved supported policy."""
     from repair_codex import discover, ROLES
     fingerprint = package_fingerprint(asar)
-    sources = list(package_sources(asar))
-    rows, errors = inventory(sources, node)
+    # Inventory consumes bounded batches; do not retain the entire package in RAM.
+    from repair_codex import renderer_sources
+    found, evidence = discover(renderer_sources(asar))
+    source_count = 0
+    def counted_sources():
+        nonlocal source_count
+        for entry in package_sources(asar):
+            source_count += 1
+            yield entry
+    rows, errors = inventory(counted_sources(), node)
     if errors:
         raise ValueError('Incomplete AST census; previous snapshot preserved: ' + json.dumps(errors[:5]))
-    found, evidence = discover((name, text) for name, text in sources if name.startswith('/webview/'))
     for row in rows:
         roles = [role for role, gate in found.items() if gate == row['id']]
         row['decision'] = 'selected' if roles else 'held'
-        row['classification'] = 'supported-positive-rollout' if roles else row['classification']
+        row['classification'] = 'supported-id-reference' if roles else row['classification']
         row['reason'] = ('existing-supported-structural-rule: ' + ','.join(roles) if roles else
                          'computed-or-nonliteral; not resolved' if row['id'] is None else
                          'unknown polarity/purpose: may be rollout, kill switch, SDK implementation or unrelated API; official default')
@@ -162,7 +169,7 @@ def refresh(asar, cache=CACHE, node=None):
                        'evidence': evidence},
             'census': {'scope': 'all ASAR packed/unpacked JavaScript; no dataflow/alias resolution; SDK-named calls are candidates, not proven SDK receivers',
                        'offset_unit': 'UTF-16 code units (AST); supported-rule evidence uses Python code points',
-                       'source_count': len(sources), 'rows': rows, 'errors': errors,
+                       'source_count': source_count, 'rows': rows, 'errors': errors,
                        'identities': identities, 'previous_package': previous.get('package') if isinstance(previous, dict) else None,
                        'diff': {'added': sorted(set(identities)-set(old)), 'removed': sorted(set(old)-set(identities))}}}
     if package_fingerprint(asar) != fingerprint:
