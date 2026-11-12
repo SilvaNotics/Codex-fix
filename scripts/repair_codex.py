@@ -15,7 +15,8 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 ROLES = ('computer_use', 'browser_use_external', 'browser_use', 'layout', 'i18n',
-         'ssh', 'appshots', 'appshots_windows', 'toys', 'dictation', 'dictation_global', 'pets_layout')
+         'ssh', 'appshots', 'appshots_windows', 'toys', 'dictation', 'dictation_global', 'pets_layout',
+         'guardian_approval')
 
 
 def renderer_sources(path):
@@ -126,6 +127,11 @@ def discover(sources):
         for match, offset in anchored_matches(appshots, text, 'allowAppshots!==!1', 1000, 50):
             for role, group in [('appshots', 4), ('appshots_windows', 5)]:
                 evidence[role].append({'id': match.group(group), 'file': filename, 'offset': offset})
+        # Named execution-feature mapping, independent of the separate default-mode
+        # gate. Preserve the official permissions/config/auth checks downstream.
+        guardian = r'\{gateName:"(\d+)",featureKey:"guardian_approval"\}'
+        for match, offset in anchored_matches(guardian, text, 'featureKey:"guardian_approval"', 45, 2):
+            evidence['guardian_approval'].append({'id': match.group(1), 'file': filename, 'offset': offset})
         toys = (r'toys:\{statsig:\["(\d+)"\],supportedClients:\["electron"\],children:\{'
                 rf'"toys.audio-visualizer":\{{settings:\[{ident}\.{ident}\.audioVisualizerEnabled\.key\]\}},'
                 rf'"toys.confetti":\{{settings:\[{ident}\.{ident}\.confettiEnabled\.key\]\}}\}}\}}')

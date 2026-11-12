@@ -255,6 +255,13 @@ def configure_features(asar):
                               "reason": "unique-structural-match" if role in found else
                                         "missing-or-ambiguous-structure; not proof of feature removal"}
                       for role in ROLES}
+    FEATURE_POLICY["guardian_approval"].update({
+        "verification_scope": "rollout-gate-only",
+        "official_publication": "not-probed",
+        "menu_visibility": "not-probed",
+        "risk_review_service": "not-probed",
+        "note": "Existing instances may await official republication; gate=true does not prove menu availability.",
+    })
     ACTIVE_FEATURES = set(found)
     REQUIRED_GATES = tuple(found[role] for role in ROLES if role != "i18n" and role in found)
     PATCH_VERSION = "policy-v3-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]

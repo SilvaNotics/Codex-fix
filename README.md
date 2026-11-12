@@ -18,6 +18,7 @@
 | 彩带特效 | 匹配 `toys` 总开关；保留 `confettiEnabled` 用户设置，不自动播放；此总开关也包含音频可视化，但保留其用户设置 |
 | 听写 | 匹配输入框听写与全局听写 rollout；保留 ChatGPT 登录、麦克风权限、宿主和服务端限制，不自动开麦，不覆盖实时语音开关 |
 | 宠物新版布局 | 动态匹配 `pets_layout` 双分支选择器，启用官方 Mini 新版设置布局；不是新增入口，不更改宠物显示偏好，不覆盖云端同步或 PIP 开关 |
+| 帮我批准（Auto-review） | 动态匹配 `guardian_approval` 的官方 gate→featureKey 映射；保留当前权限模式、工作区要求和执行层风险审查，不覆盖默认选用该模式的独立开关 |
 | 更新适配 | 每次启动扫描安装包，按功能独立匹配；无法识别的项交回官方默认 |
 | 核验报告 | 输出有效覆盖项的检查结果与回退原因 |
 
@@ -126,6 +127,18 @@
 - 账户托管宠物在 `994233.a0764414ec.js` 使用账号及 `/pets/{pet_id}` 等官方接口；本地内置宠物选择与云端创建、分享、同步不是同一种能力。网络、真实登录和工作区要求仍需满足。
 
 报告使用 `pets_layout` 区分布局与入口；匹配成功标为 `override`，否则 `official-default`，两者均不代表已验证桌面浮窗。此次只读扫描真实安装包并执行离线测试，未启动、关闭或重启 Codex，也未对运行窗口注入。
+
+### 帮我批准：入口与风险审查分别核验
+
+`26.1106.6628.0` 的官方执行功能映射为 `{gateName:"3902016271",featureKey:"guardian_approval"}`。扫描器按这对字段定位，ID 变化后重新匹配；缺失、歧义或跨角色冲突时回退官方默认。该 gate 被纳入现有 PATCH 的白名单，不硬编码到启动流程。
+
+菜单使用 `guardian-approvals`；中文说明为“仅对检测到的风险操作请求批准”。它不是完全访问权限：官方转换逻辑选择 `on-request` 与 `guardian_subagent`，并保留沙箱/权限配置。`1597774583` 是默认选用此模式的另一开关，本项目不覆盖它，也不自动写 `approvals_reviewer`、`approval_policy` 或切换当前选择。
+
+注意此功能比纯渲染开关多一条状态链：官方发布流程检查 SDK evaluations 与当前用户匹配，再把 `defaultEnableFeatures.guardian_approval` 发布到主进程，菜单从该状态读取。仅 `getFeatureGate(...).value=true` 不能证明发布成功，也不能证明风险审查模型可用。无有效 evaluations、显式 `features.guardian_approval=false`、受管理的权限要求或执行层能力不足时，本项目保留官方行为，不伪造登录或 evaluations，也不自动批准操作。
+
+报告中该项标明 `verification_scope=rollout-gate-only`，并将 `official_publication`、`menu_visibility`、`risk_review_service` 分别标为 `not-probed`。连接已有窗口后覆盖 gate 可能仍需等待官方重新发布；启动器不主动伪造发布事件，不以通用 `passed` 表示菜单或审查已可用。
+
+本次验证包括真实安装包映射扫描及离线 Python/Node 测试；另从真实 ASAR 提取官方 gate→feature map 转换函数原文，在 Node 中执行生成的实际 PATCH 后，该函数返回 `guardian_approval=true`，默认模式 gate 保持未覆盖。未重启当前运行的 Codex，未验证菜单实际显示或提交风险审查请求。
 
 ### 组件诊断：MCP、插件与操控权限分开看
 
