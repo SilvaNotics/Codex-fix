@@ -83,6 +83,9 @@ def verification_failures(state):
     for gate in REQUIRED_GATES:
         if state.get("gates", {}).get(gate) is not True:
             failures.append("gate:" + gate)
+    for role in ACTIVE_FEATURES:
+        if role.startswith('layer:') and state.get('layers', {}).get(role.split(':', 1)[1]) is not True:
+            failures.append(role)
     return failures
 
 
@@ -245,11 +248,19 @@ STATE = r"""
     try { gates[id] = window.__STATSIG__.firstInstance.getFeatureGate(id).value === true; }
     catch (_) { gates[id] = false; }
   }
+  const layers = {};
+  const DISPLAY_LAYERS = {};
+  for (const [id, parameters] of Object.entries(DISPLAY_LAYERS)) {
+    for (const parameter of parameters) {
+      try { layers[parameter] = window.__STATSIG__.firstInstance.getLayer(id).get(parameter, false) === true; }
+      catch (_) { layers[parameter] = false; }
+    }
+  }
   const buttons = [...document.querySelectorAll("button")].filter(b => b.getClientRects().length > 0);
   const label = b => (b.textContent || "").trim();
   const navigation = ["首页", "探索"].every(s => buttons.some(b => label(b) === s));
   const settingsEntry = buttons.some(b => /个人资料|profile/i.test(b.getAttribute("aria-label") || ""));
-  return JSON.stringify({ patched: window.__zhApplied === true, enable_i18n: ok, officialLayout, gates, navigation, settingsEntry, lang: document.documentElement.lang, cjk: (t.match(/[\u4e00-\u9fff]/g) || []).length, len: t.length });
+  return JSON.stringify({ patched: window.__zhApplied === true, enable_i18n: ok, officialLayout, gates, layers, navigation, settingsEntry, lang: document.documentElement.lang, cjk: (t.match(/[\u4e00-\u9fff]/g) || []).length, len: t.length });
 })()
 """
 
@@ -299,6 +310,7 @@ def apply_feature_policy(found):
     PATCH = PATCH.replace('const DISPLAY_LAYERS = {};', 'const DISPLAY_LAYERS = ' + json.dumps(display_layers) + ';')
     PATCH = PATCH.replace('"layout-v1"', json.dumps(PATCH_VERSION))
     STATE = re.sub(r'for \(const id of \[.*?\]\)', lambda _: 'for (const id of ' + gates + ')', STATE_TEMPLATE)
+    STATE = STATE.replace('const DISPLAY_LAYERS = {};', 'const DISPLAY_LAYERS = ' + json.dumps(display_layers) + ';')
     STATE = STATE.replace('"72216192"', json.dumps(found.get("i18n", "")))
     STATE = STATE.replace('"3085093835"', json.dumps(found.get("layout", "")))
     for role, policy in FEATURE_POLICY.items():

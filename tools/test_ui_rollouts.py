@@ -4,6 +4,15 @@ import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 
 class UiRolloutTests(unittest.TestCase):
+    def test_verification_fails_when_selected_display_parameter_missing(self):
+        import codex_zh_launch as launcher
+        launcher.apply_feature_policy({'layer:enable_suggested_followups':'123'})
+        state={'patched':True,'gates':{}}
+        self.assertIn('layer:enable_suggested_followups',launcher.verification_failures(state))
+        state['layers']={'enable_suggested_followups':True}
+        self.assertEqual(launcher.verification_failures(state),[])
+        self.assertIn('const DISPLAY_LAYERS = {"123": ["enable_suggested_followups"]}',launcher.STATE)
+
     def test_parameter_patch_preserves_unrelated_layer_values(self):
         import json,subprocess
         import codex_zh_launch as launcher
