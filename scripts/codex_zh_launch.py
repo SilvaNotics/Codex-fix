@@ -162,6 +162,18 @@ PATCH = r"""
     };
     inst.__zhOA = "layout-v1";
     try { inst._memoCache = {}; } catch (e) {}
+    // A late override must invalidate subscribers as well as the SDK memo cache.
+    // Defer until installation returns; reuse real status/values and let the
+    // official publisher validate evaluation identity and host eligibility.
+    setTimeout(() => {
+      try {
+        if (inst.loadingStatus === "Ready" && typeof inst.$emt === "function") {
+          const context = inst.getContext();
+          if (context?.values != null)
+            inst.$emt({ name: "values_updated", status: inst.loadingStatus, values: context.values });
+        }
+      } catch (e) {}
+    }, 0);
   }
   function patchProto(p) {
     if (!p || p.__zhPatched || typeof p.get !== "function") return;
@@ -245,22 +257,26 @@ STATE_TEMPLATE = STATE
 
 
 def configure_features(asar):
-    """Use matching persisted policy, otherwise rediscover supported roles."""
-    import hashlib
-    from repair_codex import discover, renderer_sources, ROLES
-    global PATCH, STATE, REQUIRED_GATES, ACTIVE_FEATURES, FEATURE_POLICY, PATCH_VERSION
+    """Load initialization policy only; normal launches never scan package code."""
     from feature_census import load_policy
     found = load_policy(asar)
     if found is None:
-        log('普查策略不存在或指纹已变化，回退当前安装包的已支持规则扫描')
-        found, _ = discover(renderer_sources(asar))
-    else:
-        log('已读取匹配当前安装包与扫描器指纹的普查策略')
+        raise RuntimeError('普查策略缺失、已过期或损坏，请先运行 CLICKME.cmd 或 repair-codex.cmd 初始化。启动时不执行普查。')
+    log('已读取初始化策略；启动不扫描安装包')
+    return apply_feature_policy(found)
+
+
+def apply_feature_policy(found):
+    """Build runtime payload from an already reviewed initialization policy."""
+    import hashlib
+    from repair_codex import ROLES
+    global PATCH, STATE, REQUIRED_GATES, ACTIVE_FEATURES, FEATURE_POLICY, PATCH_VERSION
+    ordered_roles = list(ROLES) + sorted(set(found) - set(ROLES))
     FEATURE_POLICY = {role: {"mode": "override" if role in found else "official-default",
                               "id": found.get(role),
                               "reason": "unique-structural-match" if role in found else
                                         "missing-or-ambiguous-structure; not proof of feature removal"}
-                      for role in ROLES}
+                      for role in ordered_roles}
     FEATURE_POLICY["guardian_approval"].update({
         "verification_scope": "rollout-gate-only",
         "official_publication": "not-probed",
@@ -269,8 +285,8 @@ def configure_features(asar):
         "note": "Existing instances may await official republication; gate=true does not prove menu availability.",
     })
     ACTIVE_FEATURES = set(found)
-    REQUIRED_GATES = tuple(found[role] for role in ROLES if role != "i18n" and role in found)
-    PATCH_VERSION = "policy-v3-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]
+    REQUIRED_GATES = tuple(found[role] for role in ordered_roles if role != "i18n" and role in found)
+    PATCH_VERSION = "policy-v4-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]
     gates = json.dumps(list(REQUIRED_GATES))
     PATCH = re.sub(r'const GATES = \[.*?\];', lambda _: 'const GATES = ' + gates + ';', PATCH_TEMPLATE)
     PATCH = re.sub(r'const LAYER = "\d+";', lambda _: 'const LAYER = ' + json.dumps(found.get("i18n", "")) + ';', PATCH)

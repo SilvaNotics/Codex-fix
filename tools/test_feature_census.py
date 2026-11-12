@@ -37,6 +37,14 @@ c["getLayer"]("layer");c.getExperiment(`literal`);c.getDynamicConfig("cfg");
         self.assertEqual(len(rows), 5)
         self.assertEqual(errors, [])
 
+    def test_launch_does_not_hash_or_scan_package_when_cache_missing(self):
+        from unittest.mock import patch
+        import feature_census as census
+        import codex_zh_launch as launcher
+        with patch.object(census, 'load_policy', return_value=None), patch('repair_codex.renderer_sources', side_effect=AssertionError('startup scanned package')):
+            with self.assertRaisesRegex(RuntimeError, 'CLICKME|repair'):
+                launcher.configure_features('not-initialized.asar')
+
     def test_launcher_uses_valid_cache_and_rejects_stale_cache(self):
         import tempfile
         from unittest.mock import patch
@@ -53,8 +61,8 @@ c["getLayer"]("layer");c.getExperiment(`literal`);c.getDynamicConfig("cfg");
             self.assertEqual(launcher.REQUIRED_GATES, ('123',))
             write_asar(asar, {'webview/a.js':'const m={gateName:"456",featureKey:"guardian_approval"};'})
             with patch.object(census, 'load_policy', side_effect=lambda a: original(a, cache)):
-                launcher.configure_features(asar)
-            self.assertEqual(launcher.REQUIRED_GATES, ('456',))
+                with self.assertRaisesRegex(RuntimeError, 'CLICKME|repair'):
+                    launcher.configure_features(asar)
 
     def test_entrypoints_run_census_before_install_or_repair(self):
         install = (SCRIPTS / 'install.ps1').read_text(encoding='utf-8-sig')
@@ -109,6 +117,18 @@ c["getLayer"]("layer");c.getExperiment(`literal`);c.getDynamicConfig("cfg");
             self.assertEqual(changed['policy']['found'], {})
             cache.write_text('{bad', encoding='utf-8')
             self.assertIsNone(census.load_policy(asar, cache))
+
+    def test_cached_policy_load_never_reads_or_hashes_package_body(self):
+        import tempfile
+        from unittest.mock import patch
+        import feature_census as census
+        with tempfile.TemporaryDirectory() as folder:
+            asar = Path(folder)/'app.asar'
+            cache = Path(folder)/'policy.json'
+            write_asar(asar, {'webview/a.js':'const m={gateName:"123",featureKey:"guardian_approval"};'})
+            census.refresh(asar, cache)
+            with patch.object(census, 'package_fingerprint', side_effect=AssertionError('full hash on launch')), patch.object(census, 'package_sources', side_effect=AssertionError('source scan on launch')):
+                self.assertEqual(census.load_policy(asar, cache), {'guardian_approval':'123'})
 
 
 def write_asar(path, files):

@@ -51,8 +51,7 @@ console.log(JSON.stringify({vendor:c.overrideAdapter.getGateOverride({name:'vend
         launcher = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(launcher)
         import sys
-        with patch.dict(sys.modules, {'repair_codex': repair}), patch.object(repair, 'renderer_sources', return_value=[('fixture.js', FIXTURE)]):
-            launcher.configure_features('fixture.asar')
+        launcher.apply_feature_policy(repair.discover([('fixture.js', FIXTURE)])[0])
         js = '''global.window=global;global.setInterval=()=>0;global.setTimeout=()=>0;
 ''' + launcher.PATCH + '''
 const c={};window.__STATSIG__={firstInstance:c};

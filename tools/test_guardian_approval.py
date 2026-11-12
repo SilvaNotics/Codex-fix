@@ -36,6 +36,46 @@ class GuardianApprovalTests(unittest.TestCase):
             for field in ('official_publication', 'menu_visibility', 'risk_review_service'):
                 self.assertEqual(policy[field], 'not-probed')
 
+    def test_late_patch_notifies_official_publication_once_with_existing_values(self):
+        module = test_policy.PolicyTests().configure(MAPPING)
+        script = '''global.window=global;global.setInterval=()=>0;
+const tasks=[];global.setTimeout=f=>tasks.push(f);
+const context={user:{custom:{auth_status:'logged_out'}},values:{existing:true}};
+const config={features:{guardian_approval:false},approvals_reviewer:'user'};
+const events=[];const c={loadingStatus:'Ready',getContext:()=>context,
+  $emt:e=>events.push({name:e.name,status:e.status,sameValues:e.values===context.values,
+    gate:c.overrideAdapter.getGateOverride({name:'805'}).value})};
+window.__STATSIG__={firstInstance:c};
+''' + module.PATCH + '''
+void window.__STATSIG__;void window.__STATSIG__;
+for(const task of tasks)task();
+console.log(JSON.stringify({events,context,config}));
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True,
+                                check=True, timeout=15)
+        state = json.loads(result.stdout)
+        self.assertEqual(state['events'], [{'name': 'values_updated', 'status': 'Ready',
+                                           'sameValues': True, 'gate': True}])
+        self.assertEqual(state['context']['user'], {'custom': {'auth_status': 'logged_out'}})
+        self.assertEqual(state['config'], {'features': {'guardian_approval': False},
+                                          'approvals_reviewer': 'user'})
+
+    def test_notification_waits_for_real_ready_values_and_tolerates_missing_emitter(self):
+        module = test_policy.PolicyTests().configure(MAPPING)
+        for ready, values, emitter in ((False, True, True), (True, False, True),
+                                       (True, True, False)):
+            script = '''global.window=global;global.setInterval=()=>0;
+const tasks=[];global.setTimeout=f=>tasks.push(f);let events=0;
+const c={loadingStatus:READY?'Ready':'Loading',getContext:()=>({values:VALUES?{}:null})};
+if(EMITTER)c.$emt=()=>events++;
+window.__STATSIG__={firstInstance:c};
+'''.replace('READY', json.dumps(ready)).replace('VALUES', json.dumps(values)).replace('EMITTER', json.dumps(emitter)) + module.PATCH + '''
+void window.__STATSIG__;for(const task of tasks)task();console.log(events);
+'''
+            result = subprocess.run(['node', '-e', script], capture_output=True, text=True,
+                                    check=True, timeout=15)
+            self.assertEqual(result.stdout.strip(), '0')
+
     def test_actual_patch_preserves_default_selection_and_other_gate_overrides(self):
         module = test_policy.PolicyTests().configure(MAPPING)
         self.assertEqual(module.REQUIRED_GATES, ('805',))

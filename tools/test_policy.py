@@ -19,8 +19,7 @@ class PolicyTests(unittest.TestCase):
     def configure(self, text):
         module = self.load()
         from test_repair import repair
-        with patch.dict(sys.modules, {'repair_codex': repair}), patch.object(repair, 'renderer_sources', return_value=[('fixture.js', text)]):
-            module.configure_features('test.asar')
+        module.apply_feature_policy(repair.discover([('fixture.js', text)])[0])
         return module
 
     def test_removed_dual_layout_defaults_only_layout(self):
