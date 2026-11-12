@@ -51,7 +51,7 @@ def digest(value):
 
 def scanner_fingerprint():
     return digest({name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-                   for name in ('feature_census.py', 'census_ast.cjs', 'reviewed_features.py', 'repair_codex.py', 'vendor/acorn.cjs')})
+                   for name in ('feature_census.py', 'census_ast.cjs', 'ui_rollouts.py', 'reviewed_features.py', 'repair_codex.py', 'vendor/acorn.cjs')})
 
 
 def package_identity(asar):
@@ -115,10 +115,12 @@ def load_policy(asar, cache=CACHE):
         found = data['policy']['found']
         from repair_codex import ROLES
         from reviewed_features import APPROVED
-        allowed = set(ROLES) | {'feature:' + name for name in APPROVED}
+        from ui_rollouts import PARAMETERS
+        allowed = set(ROLES) | {'feature:' + name for name in APPROVED} | {'layer:' + name for name in PARAMETERS}
         if not isinstance(found, dict) or any(k not in allowed or not isinstance(v, str) or not v.isdecimal() for k,v in found.items()):
             return None
-        if len(set(found.values())) != len(found):
+        gate_values = [v for k,v in found.items() if not k.startswith('layer:')]
+        if len(set(gate_values)) != len(gate_values):
             return None
         return found
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -162,6 +164,8 @@ def refresh(asar, cache=CACHE, node=None):
     from collections import Counter
     counts = Counter(combined.values())
     found = {role: gate for role, gate in combined.items() if counts[gate] == 1}
+    from ui_rollouts import reviewed_layers
+    found.update(reviewed_layers(rows))
     for audit in review_audit:
         if audit['decision'] == 'approve' and 'feature:' + audit['name'] not in found:
             audit.update(decision='hold', reason='ID collides with another reviewed role.')

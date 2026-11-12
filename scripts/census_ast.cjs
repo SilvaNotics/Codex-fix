@@ -70,6 +70,24 @@ process.stdin.on('end', () => {
         }
       }
       if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
+        const getter = node.callee, layerCall = getter.object;
+        if (!getter.computed && getter.property.name === 'get' && layerCall?.type === 'CallExpression'
+            && layerCall.callee.type === 'MemberExpression' && !layerCall.callee.computed
+            && layerCall.callee.property.name === 'getLayer') {
+          const parameter = literal(node.arguments[0]), id = literal(layerCall.arguments[0]);
+          let fn = parents.get(node);
+          while (fn && !/Function/.test(fn.type)) fn = parents.get(fn);
+          const body = fn ? source.slice(fn.start,fn.end) : '';
+          const fallback = node.arguments[1];
+          const falseDefault = fallback?.type === 'UnaryExpression' && fallback.operator === '!'
+            && fallback.argument.type === 'Literal' && fallback.argument.value === 1;
+          const followups = parameter === 'enable_suggested_followups'
+            && ['encoded_follow_up_actions','slice(0,3)','followUps:','reference:'].every(s=>body.includes(s));
+          const thumbnail = parameter === 'enable_thumbnail_asset'
+            && ['thumbnail_asset_key','Object.keys(','https://persistent.oaistatic.com/learning-block-thumbnails/'].every(s=>body.includes(s));
+          if (id && falseDefault && (followups || thumbnail))
+            add('reviewed-display-layer',parameter,node,id,{review_rule:'same-function-learning-data-and-display-sink'});
+        }
         const member = node.callee;
         const method = member.computed ? literal(member.property) : member.property.name;
         if (methods.has(method)) add('sdk-call',method,node,literal(node.arguments[0]));

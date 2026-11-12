@@ -133,6 +133,8 @@ class CdpSession:
 PATCH = r"""
 (() => {
   const LAYER = "72216192";
+  const DISPLAY_LAYERS = {};
+  const displayOverride = (layer, key) => DISPLAY_LAYERS[String(layer)]?.includes(key) === true;
   // 只覆盖已验证的功能：CU / 两类浏览器操控 / 官方 rail 导航。
   // 国内无法连接 Statsig 时布局回退 legacy；无需伪造登录或修改 DOM/CSS。
   const GATES = ["1506311413", "410065390", "410262010", "3085093835"];
@@ -179,7 +181,7 @@ PATCH = r"""
     if (!p || p.__zhPatched || typeof p.get !== "function") return;
     const og = p.get;
     p.get = function (k, d) {
-      if (this && this.name === LAYER && k === "enable_i18n") return true;
+      if (this && ((this.name === LAYER && k === "enable_i18n") || displayOverride(this.name, k))) return true;
       return og.call(this, k, d);
     };
     p.__zhPatched = true;
@@ -206,9 +208,9 @@ PATCH = r"""
         const ogI = inst.getLayer.bind(inst);
         inst.getLayer = function (name, fb, opts) {
           const l = ogI(name, fb, opts);
-          if (name === LAYER && l && typeof l.get === "function" && !l.__zh) {
+          if ((name === LAYER || DISPLAY_LAYERS[String(name)]) && l && typeof l.get === "function" && !l.__zh) {
             const g = l.get.bind(l);
-            l.get = function (k, d) { return k === "enable_i18n" ? true : g(k, d); };
+            l.get = function (k, d) { return (name === LAYER && k === "enable_i18n") || displayOverride(name, k) ? true : g(k, d); };
             l.__zh = true;
           }
           return l;
@@ -285,11 +287,16 @@ def apply_feature_policy(found):
         "note": "Existing instances may await official republication; gate=true does not prove menu availability.",
     })
     ACTIVE_FEATURES = set(found)
-    REQUIRED_GATES = tuple(found[role] for role in ordered_roles if role != "i18n" and role in found)
+    REQUIRED_GATES = tuple(found[role] for role in ordered_roles if role != "i18n" and not role.startswith('layer:') and role in found)
     PATCH_VERSION = "policy-v4-" + hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()[:16]
     gates = json.dumps(list(REQUIRED_GATES))
     PATCH = re.sub(r'const GATES = \[.*?\];', lambda _: 'const GATES = ' + gates + ';', PATCH_TEMPLATE)
     PATCH = re.sub(r'const LAYER = "\d+";', lambda _: 'const LAYER = ' + json.dumps(found.get("i18n", "")) + ';', PATCH)
+    display_layers = {}
+    for role, layer in found.items():
+        if role.startswith('layer:'):
+            display_layers.setdefault(layer, []).append(role.split(':', 1)[1])
+    PATCH = PATCH.replace('const DISPLAY_LAYERS = {};', 'const DISPLAY_LAYERS = ' + json.dumps(display_layers) + ';')
     PATCH = PATCH.replace('"layout-v1"', json.dumps(PATCH_VERSION))
     STATE = re.sub(r'for \(const id of \[.*?\]\)', lambda _: 'for (const id of ' + gates + ')', STATE_TEMPLATE)
     STATE = STATE.replace('"72216192"', json.dumps(found.get("i18n", "")))
