@@ -119,11 +119,13 @@
 
 菜单使用 `guardian-approvals`；中文说明为“仅对检测到的风险操作请求批准”。它不是完全访问权限：官方转换逻辑选择 `on-request` 与 `guardian_subagent`，并保留沙箱/权限配置。`1597774583` 是默认选用此模式的另一开关，本项目不覆盖它，也不自动写 `approvals_reviewer`、`approval_policy` 或切换当前选择。
 
-注意此功能比纯渲染开关多一条状态链：官方发布流程检查 SDK evaluations 与当前用户匹配，再把 `defaultEnableFeatures.guardian_approval` 发布到主进程，菜单从该状态读取。仅 `getFeatureGate(...).value=true` 不能证明发布成功，也不能证明风险审查模型可用。无有效 evaluations、显式 `features.guardian_approval=false`、受管理的权限要求或执行层能力不足时，本项目保留官方行为，不伪造登录或 evaluations，也不自动批准操作。
+注意此功能比纯渲染开关多一条状态链：官方发布流程检查 SDK evaluations 与当前用户匹配，再把 `defaultEnableFeatures.guardian_approval` 发布到主进程，菜单从该状态读取。仅 `getFeatureGate(...).value=true` 不能证明菜单或执行功能已启用，也不能证明风险审查模型可用。旧修复在 evaluations 失效且 Statsig 不可达时仍会缺少菜单项。
 
-报告中该项标明 `verification_scope=rollout-gate-only`，并将 `official_publication`、`menu_visibility`、`risk_review_service` 分别标为 `not-probed`。连接已有窗口后覆盖 gate 可能仍需等待官方重新发布；启动器不主动伪造发布事件，不以通用 `passed` 表示菜单或审查已可用。
+启动器优先核验官方发布；未就绪时，在当前渲染进程增加本地功能默认值，只合并 `guardian_approval=true` 到菜单读取的派生状态与执行适配器读取的功能默认值。安装前确认主进程分配结果与当前 SDK 用户一致，用户或 SDK 实例变化后覆盖失效。此路径不调用 `refreshValuesAsync()`，启用入口无需 Statsig 连通或开启代理；不改写 evaluations、身份、哈希、官方发布事件或其他功能值。模块按结构发现，结构缺失或歧义时报告失败，不依赖固定 chunk/module ID。
 
-本次验证包括真实安装包映射扫描及离线 Python/Node 测试；另从真实 ASAR 提取官方 gate→feature map 转换函数原文，在 Node 中执行生成的实际 PATCH 后，该函数返回 `guardian_approval=true`，默认模式 gate 保持未覆盖。未重启当前运行的 Codex，未验证菜单实际显示或提交风险审查请求。
+报告中该项标明 `verification_scope=rollout-gate-and-effective-local-default`。官方路径为 `status=ready`；本地路径为 `status=ready-local`、`local_override=passed`，同时如实保留 `identity_valid` 与 `official_publication` 的官方检查结果。`--verify-only` 只读取现有状态，不安装覆盖或刷新评估。自动报告中的 `menu_visibility`、`risk_review_service` 仍为 `not-probed`，不能把功能默认值通过当成真实风险审查请求成功。
+
+显式 `features.guardian_approval=false`、受管理的权限要求及官方权限转换仍然生效，不自动切换当前模式或批准操作。风险审查模型仍通过实际配置的服务运行，须另行验证。2026-11-17 在 `26.1111.2228.0` 运行实例验证了菜单与执行功能默认值，并在桌面权限菜单实际看到“帮我批准”；离线测试覆盖无刷新、无官方发布时的本地启用、其他功能值保留与用户变化后失效。未提交风险审查请求。
 
 ### 组件诊断：MCP、插件与操控权限分开看
 

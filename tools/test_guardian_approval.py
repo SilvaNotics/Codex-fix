@@ -32,7 +32,7 @@ class GuardianApprovalTests(unittest.TestCase):
     def test_report_does_not_claim_publication_menu_or_service_verified(self):
         for text in (MAPPING, ''):
             policy = test_policy.PolicyTests().configure(text).FEATURE_POLICY['guardian_approval']
-            self.assertEqual(policy['verification_scope'], 'rollout-gate-only')
+            self.assertEqual(policy['verification_scope'], 'rollout-gate-and-effective-local-default')
             for field in ('official_publication', 'menu_visibility', 'risk_review_service'):
                 self.assertEqual(policy[field], 'not-probed')
 
@@ -53,7 +53,8 @@ defaultMode:c.overrideAdapter.getGateOverride({name:'1597774583'}),preferences})
         self.assertTrue(state['rollout'])
         self.assertEqual(state['defaultMode'], {'value': False, 'ruleID': 'previous'})
         self.assertEqual(state['preferences'], {'mode': 'full-access'})
-        self.assertEqual(module.verification_failures({'patched': True, 'gates': {'805': True}}), [])
+        self.assertEqual(module.verification_failures({'patched': True, 'gates': {'805': True}}),
+                         ['guardian-publication'])
 
 
 if __name__ == '__main__':

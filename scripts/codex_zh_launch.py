@@ -67,7 +67,7 @@ PATCH_VERSION = "layout-v1"
 REPORT = os.path.join(LOG_DIR, "verification.json")
 
 
-def verification_failures(state):
+def verification_failures(state, check_guardian=True):
     """功能开关与真实导航同时成立才通过，不能只凭注入标记自证成功。"""
     failures = []
     keys = ["patched"]
@@ -83,6 +83,12 @@ def verification_failures(state):
     for gate in REQUIRED_GATES:
         if state.get("gates", {}).get(gate) is not True:
             failures.append("gate:" + gate)
+    if check_guardian and "guardian_approval" in ACTIVE_FEATURES:
+        guardian = state.get("guardian_approval", {})
+        official = guardian.get("status") == "ready" and guardian.get("official_publication") == "passed"
+        local = guardian.get("status") == "ready-local" and guardian.get("local_override") == "passed"
+        if not (official or local):
+            failures.append("guardian-publication")
     return failures
 
 
@@ -111,11 +117,11 @@ class CdpSession:
         self.ws = ws
         self.sequence = 0
 
-    async def call(self, method, params=None):
+    async def call(self, method, params=None, timeout=15):
         self.sequence += 1
         request_id = self.sequence
         await self.ws.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + timeout
         while True:
             message = json.loads(await asyncio.wait_for(self.ws.recv(), max(0.01, deadline - time.monotonic())))
             if message.get("id") != request_id:
@@ -124,11 +130,31 @@ class CdpSession:
                 raise RuntimeError(f"CDP {method}: {message['error']}")
             return message.get("result", {})
 
-    async def evaluate(self, expression):
-        result = await self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    async def evaluate(self, expression, await_promise=False, timeout=15):
+        result = await self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True,
+                                                      "awaitPromise": await_promise}, timeout=timeout)
         if result.get("exceptionDetails"):
             raise RuntimeError("JavaScript: " + str(result["exceptionDetails"]))
         return result.get("result", {}).get("value")
+
+async def probe_guardian(rpc, verify_only=False):
+    """Apply a local feature default without requiring Statsig connectivity."""
+    from pathlib import Path
+    try:
+        source = (Path(PROJECT_ROOT) / "assets" / "guardian_approval.js").read_text(encoding="utf-8")
+        expression = source + "(" + json.dumps({"refresh": False,
+                                                "installLocalOverride": not verify_only,
+                                                "timeoutMs": 45000}) + ")"
+        result = await rpc.evaluate(expression, await_promise=True, timeout=55)
+        if not isinstance(result, dict):
+            raise ValueError("invalid guardian result")
+        return result
+    except Exception:
+        # Do not copy CDP/SDK exceptions into reports: they can contain private data.
+        return {"status": "unavailable", "reason": "guardian-probe-unavailable",
+                "official_publication": "not-probed", "menu_visibility": "not-probed",
+                "risk_review_service": "not-probed"}
+
 
 PATCH = r"""
 (() => {
@@ -256,11 +282,11 @@ def configure_features(asar):
                                         "missing-or-ambiguous-structure; not proof of feature removal"}
                       for role in ROLES}
     FEATURE_POLICY["guardian_approval"].update({
-        "verification_scope": "rollout-gate-only",
+        "verification_scope": "rollout-gate-and-effective-local-default",
         "official_publication": "not-probed",
         "menu_visibility": "not-probed",
         "risk_review_service": "not-probed",
-        "note": "Existing instances may await official republication; gate=true does not prove menu availability.",
+        "note": "Local feature default works without Statsig; permissions and real risk review remain official.",
     })
     ACTIVE_FEATURES = set(found)
     REQUIRED_GATES = tuple(found[role] for role in ROLES if role != "i18n" and role in found)
@@ -611,20 +637,27 @@ async def main(verify_only=False):
         state = {}
         while time.monotonic() < deadline:
             state = json.loads(await rpc.evaluate(STATE) or "{}")
-            failures = verification_failures(state)
+            failures = verification_failures(state, check_guardian=False)
             if not failures:
-                write_report({"status": "passed", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                              "app_path": EXE, "port": PORT, "state": state, "features": FEATURE_POLICY,
-                              "components": await asyncio.to_thread(component_diagnostics),
-                              "verification_scope": "active-overrides-only"})
-                log("核验通过：" + json.dumps(state, ensure_ascii=False))
-                return
+                if "guardian_approval" in ACTIVE_FEATURES:
+                    guardian = await probe_guardian(rpc, verify_only=verify_only)
+                    state["guardian_approval"] = guardian
+                    FEATURE_POLICY["guardian_approval"].update(guardian)
+                break
             await asyncio.sleep(1)
-        write_report({"status": "failed", "port": PORT, "state": state,
+        failures = verification_failures(state)
+        write_report({"status": "failed" if failures else "passed",
+                      "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                      "app_path": EXE, "port": PORT, "state": state, "features": FEATURE_POLICY,
                       "components": await asyncio.to_thread(component_diagnostics),
-                      "failures": verification_failures(state)})
-        raise RuntimeError("核验失败：" + ", ".join(verification_failures(state)) +
-                           "；可能为新版兼容性变化，请查看 verification.json")
+                      "verification_scope": "active-overrides-and-effective-local-default",
+                      "failures": failures})
+        if failures:
+            detail = state.get("guardian_approval", {}).get("reason", "not-probed")
+            raise RuntimeError("核验失败：" + ", ".join(failures) +
+                               ("；帮我批准的本地功能覆盖未就绪：" + detail if "guardian-publication" in failures else "") +
+                               "；请查看 " + REPORT)
+        log("核验通过：" + json.dumps(state, ensure_ascii=False))
 
 
 def entry():
