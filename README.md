@@ -32,7 +32,7 @@
 - 不保证任意未来版本都能适配；无法识别不等于功能被移除，也不会猜测开关 ID。
 - 通过本项目入口启动才会执行补丁。从开始菜单打开官方入口不会自动注入。
 
-## 2. 安装与首次启动
+## 2. 准备与启动
 
 ### 2.1 环境要求
 
@@ -54,44 +54,29 @@
 
 ### 2.2 下载完整项目
 
-下载仓库 ZIP 并完整解压，或使用 Git 克隆。保留脚本与 `assets` 的相对位置，不要只复制一个 VBS 文件。
+下载仓库 ZIP 并完整解压，或使用 Git 克隆。保留根目录与 `scripts/` 的相对位置，不要只复制一个入口文件。
 
-解压后直接双击根目录 `CLICKME.cmd`：自动检查并修复编码，然后调用 `scripts/install.ps1`。其余程序集中在 `scripts/`，不要单独移动。
+解压后直接双击根目录 `CLICKME.cmd`：自动检查并修复 VBS 编码，然后通过 `scripts/start-codex.vbs` 启动 Python 启动器。其余程序集中在 `scripts/`，不要单独移动。
 
-> **跨电脑编码提醒：** 安装器出现 `using System` 解析错误，或 VBS 提示“未结束的字符串常量 / 800A0409”时，先按第 5.1 节转换编码。无需为此重装 Codex、调整沙箱或修改系统区域设置。
+> **跨电脑编码提醒：** VBS 提示“未结束的字符串常量 / 800A0409”时，先按第 5.1 节检查编码。无需为此重装 Codex、调整沙箱或修改系统区域设置。
 
-### 2.3 创建快捷方式
+### 2.3 启动
 
-确认 Codex 没有正在执行的任务，直接双击 **`CLICKME.cmd`** 即可，不需要打开终端。它先检查编码，再调用原安装器；不会自动安装 Python 或依赖。
+确认 Codex 没有正在执行的任务，直接双击 **`CLICKME.cmd`** 即可，不需要打开终端。编码检查通过后调用隐藏窗口的 VBS 入口；不会自动安装 Python 或依赖。
 
-需要指定参数时，可在项目目录运行：
-
-```powershell
-.\CLICKME.cmd -NoRestart
-```
-
-默认创建桌面快捷方式和任务栏目录中的快捷方式，并重启 Explorer。任务栏是否立即显示固定项也受 Windows 版本与策略影响。
-
-| 参数 | 用途 |
-|---|---|
-| `-SkipTaskbar` | 只创建桌面快捷方式，不处理任务栏，也不重启 Explorer |
-| `-NoRestart` | 创建快捷方式，但不自动重启 Explorer |
-
-例如，只安装桌面入口：
-
-```powershell
-.\CLICKME.cmd -SkipTaskbar
-```
-
-### 2.4 启动
-
-双击桌面的 **Codex 中文**，或直接双击 `scripts/start-codex.vbs`。
+项目按需使用，不创建桌面快捷方式或任务栏固定项，不设置自定义图标，也不重启 Explorer。旧版的 `-SkipTaskbar` / `-NoRestart` 安装参数已移除。也可直接双击 `scripts/start-codex.vbs`。
 
 也可直接用自有 Python 启动，绕过 VBS 的解释器查找：
 
 ```powershell
 & 'C:\实际路径\python.exe' .\scripts\codex_zh_launch.py
 ```
+
+### 2.4 本地配置与缓存
+
+启动器补充的语言和插件配置会保存在本地，官方客户端也可能保留自身缓存。后续从官方入口启动时，若所需功能仍正常，可继续日常使用；功能回退或更新后需要重新适配时，再运行 `CLICKME.cmd`。
+
+本项目注入的功能开关覆盖只存在于当前 Codex 进程内存中，不会写入官方安装包，也没有“使用固定次数后永久生效”的机制。本地配置或缓存存在，不保证完全退出并重启后仍保留全部覆盖效果。
 
 ## 3. 日常使用与结果检查
 
@@ -209,25 +194,15 @@ repair-codex.cmd
 
 ## 5. 故障排查
 
-### 5.1 脚本编码兼容性：PowerShell 与 VBScript
+### 5.1 VBS 启动入口的编码兼容性
 
-**典型情况：同一项目在一台电脑正常，另一台电脑还没启动 Codex 就报语法错误。**
+**典型情况：同一项目在一台电脑正常，另一台电脑的 `start-codex.vbs` 提示“未结束的字符串常量 / 800A0409”。**
 
-| 入口 | 可能看到的报错 |
-|---|---|
-| `install.ps1` | `using System`、`using 语句必须出现在…之前`、`MissingUsingStatementDirective`，随后大量括号错误 |
-| `start-codex.vbs` | “未结束的字符串常量”，错误代码 `800A0409` |
-
-包含中文的 UTF-8 无 BOM 脚本可能在不同系统代码页下被错误解码。Windows PowerShell 5.1 与传统 Windows Script Host 的编码处理不同，推荐格式为：
-
-- **PS1：UTF-8 带 BOM。**
-- **VBS：UTF-16 LE 带 BOM。不要把 VBS 也统一保存为 UTF-8 BOM。**
-
-已有跨电脑使用者反馈，转换两个入口后恢复正常。**不是所有同类错误都由编码造成**，源码截断或引号损坏也会产生相同症状。
+包含中文的 UTF-8 无 BOM 脚本可能在不同系统代码页下被传统 Windows Script Host 错误解码。`start-codex.vbs` 应使用 **UTF-16 LE 带 BOM**，不要保存为 UTF-8 BOM。源码截断或引号损坏也会产生相同症状。
 
 #### 自动检查与修复
 
-双击根目录 `CLICKME.cmd`。入口自身仅含 ASCII，不依赖系统代码页；在执行安装器前，将 `scripts/install.ps1` 规范为 UTF-8 BOM、`scripts/start-codex.vbs` 规范为 UTF-16 LE BOM。首次转换备份保存于 `output/backups/*.bak-encoding`，重复运行不覆盖原备份；无法严格解码时停止，不猜测源编码。
+双击根目录 `CLICKME.cmd`。入口自身仅含 ASCII，不依赖系统代码页；在启动前将 `scripts/start-codex.vbs` 规范为 UTF-16 LE BOM。首次转换备份保存于 `output/backups/start-codex.vbs.bak-encoding`，重复运行不覆盖原备份；无法严格解码时停止，不猜测源编码。
 
 文件若已被错误解码并保存，转码不能找回丢失字符，请重新下载。仍有语法错误时请提供具体文件、行号与系统版本。
 
@@ -246,14 +221,13 @@ WSL 模式下，`model_catalog_json` 若仍是 Windows 绝对路径，Linux 内�
 | 界面英文 / 布局没变化 | 检查 `verification.json` 对应功能是覆盖、回退还是失败，再看日志 |
 | 没有电脑操控入口 | 检查功能匹配、插件配置与主进程环境；入口存在不代表任务权限完整 |
 | 长时间等待 `DevToolsActivePort` | 检查应用是否启动、是否回退为 `popen`；无任务时完全退出后重试 |
-| 任务栏两个图标 / 图标模糊 | 检查快捷方式 AUMID 与启动方式；`popen` 回退没有正常 AppX 包身份 |
 | `Workspace routing is unavailable` | 检查真实账号、工作区与官方服务网络；本项目不伪造云端权限 |
 | “始终允许的应用”列表为空 | 检查 app tools / `cua_repl` 与账号状态；`authStatus=unsupported` 不能靠界面开关解决 |
 | REPL 内核退出 / `windows sandbox failed` | 检查 Codex 自身 REPL 与沙箱日志；这是运行时问题，不能凭本项目的 `passed` 判断已修复 |
 
 ## 6. 卸载与回滚
 
-1. 删除项目创建的桌面快捷方式和任务栏固定项。
+1. 停止使用项目入口；旧版曾创建的桌面快捷方式和任务栏固定项可手动删除，当前版本不再创建。
 2. **完全退出 Codex**，再从官方入口启动，清除进程内覆盖。只关闭窗口可能仍在后台运行。
 3. 官方 `app.asar`、`chrome.dll` 等安装文件未被修改，无需恢复官方包。
 4. 如需撤销配置补充，参考 `output/backups/config.toml.bak-codexzh`。**先备份当前配置并比较差异，不要直接覆盖，以免丢失后续新增的模型或供应商设置。**
@@ -265,7 +239,8 @@ WSL 模式下，`model_catalog_json` 若仍是 Windows 绝对路径，Linux 内�
 ### 启动流程
 
 ```text
-桌面快捷方式 / start-codex.vbs
+CLICKME.cmd（检查 VBS 编码）
+  -> scripts/start-codex.vbs
   -> 查找 pythonw.exe / python.exe
   -> codex_zh_launch.py
      -> 定位当前 MSIX 安装包，只读扫描 ASAR
@@ -285,11 +260,10 @@ WSL 模式下，`model_catalog_json` 若仍是 Windows 绝对路径，Linux 内�
 
 ```text
 Codex-fix/
-├── CLICKME.cmd              # 编码检查后调用已有安装器
+├── CLICKME.cmd              # 编码检查后直接启动
 ├── repair-codex.cmd         # 双击检测修复入口
 ├── README.md
 ├── scripts/                # Python / PowerShell / VBS 运行脚本
-│   ├── install.ps1
 │   ├── start-codex.vbs
 │   ├── repair-entry.ps1
 │   ├── codex_zh_launch.py
@@ -299,7 +273,6 @@ Codex-fix/
 ├── output/                 # .gitkeep 保留目录，运行产物由 Git 忽略
 │   ├── logs/               # 日志、核验报告、端口缓存与修复锁
 │   └── backups/            # 编码、源码与配置备份
-├── assets/                 # 快捷方式图标
 └── tools/                  # 自动化测试与调试工具
 ```
 
@@ -324,8 +297,7 @@ Codex-fix/
 - 启动器只是 CDP 客户端，不监听 TCP、不常驻。客户端退出不等于 Codex 调试端口关闭，不要将端口暴露给不可信网络或程序。
 - 重启需结束完整进程树；窗口关闭后后台存活，不能直接判断为端口泄漏。
 - AppX 激活在独立线程执行，避免 asyncio 初始化 COM 后与 STA 冲突。
-- 快捷方式 AUMID 通过 `IShellLink -> IPropertyStore -> IPersistFile.Save` 写入，保留 target、args 与 icon。
-- 发布到其他电脑前检查中文入口编码：PS1 用 UTF-8 BOM，VBS 用 UTF-16 LE BOM。
+- 发布到其他电脑前检查 VBS 启动入口编码：使用 UTF-16 LE BOM。
 
 ## 免责声明
 

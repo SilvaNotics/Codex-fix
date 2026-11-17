@@ -1,7 +1,6 @@
 """用 IApplicationActivationManager 以“包身份”启动 Codex，并附带启动参数。
 
-好处：进程带 package identity，任务栏/开始菜单用 MSIX 官方图标素材（清晰），
-      同时 --remote-debugging-port 能生效，补丁照样注入。
+保留官方 MSIX 包身份，同时传入 --remote-debugging-port，供启动器注入补丁。
 """
 import ctypes
 from ctypes import wintypes

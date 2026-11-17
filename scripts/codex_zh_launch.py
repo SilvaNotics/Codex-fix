@@ -483,7 +483,7 @@ def ensure_config(active_features=None):
 
 
 def spawn_app():
-    """优先用 AppX 激活启动（进程带包身份 → 任务栏/开始菜单用 MSIX 官方图标素材，清晰），
+    """优先用 AppX 激活启动，保留官方 MSIX 包身份，
     同时把 --remote-debugging-port 作为激活参数传进去。失败则回退为直接起 exe。"""
     try:
         import importlib.util
