@@ -427,37 +427,57 @@ def ensure_config(active_features=None):
     fixes = []
 
     import tomllib
+    from copy import deepcopy
     parsed = tomllib.loads(src)  # 原配置非法时立即停止，不在损坏的配置上继续修补。
+    expected = deepcopy(parsed)
+
+    def section(*path):
+        parts = []
+        for part in path:
+            forms = [re.escape(json.dumps(part)), re.escape("'" + part + "'")]
+            if re.fullmatch(r"[A-Za-z0-9_-]+", part):
+                forms.append(re.escape(part))
+            parts.append("(?:" + "|".join(forms) + ")")
+        header = r"[ \t]*\.[ \t]*".join(parts)
+        return re.search(r"(?ms)^[ \t]*\[[ \t]*" + header +
+                         r"[ \t]*\][ \t]*(?:#[^\n]*)?(?:\n|\Z)(.*?)(?=^[ \t]*\[|\Z)", src)
+
     # Explicit user opt-outs are permissions, not missing configuration.
     plugins = [plug for plug in plugins
                if parsed.get("plugins", {}).get(plug, {}).get("enabled") is not False]
     if "i18n" in active and parsed.get("desktop", {}).get("localeOverride") != "zh-CN":
-        desktop = re.search(r"(?ms)^\[desktop\][ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
+        desktop = section("desktop")
         if desktop:
             body = desktop.group(1)
             if re.search(r"(?m)^[ \t]*localeOverride[ \t]*=", body):
                 body = re.sub(r"(?m)^[ \t]*localeOverride[ \t]*=.*$", 'localeOverride = "zh-CN"', body, count=1)
             else:
                 body = 'localeOverride = "zh-CN"\n' + body
-            src = src[:desktop.start(1)] + body + src[desktop.end(1):]
+            separator = "" if src[:desktop.start(1)].endswith("\n") else "\n"
+            src = src[:desktop.start(1)] + separator + body + src[desktop.end(1):]
         else:
             src = src.rstrip("\n") + '\n\n[desktop]\nlocaleOverride = "zh-CN"\n'
         fixes.append("localeOverride=zh-CN")
+        expected.setdefault("desktop", {})["localeOverride"] = "zh-CN"
 
     for plug in plugins:
+        if parsed.get("plugins", {}).get(plug, {}).get("enabled") is True:
+            continue
         hdr = '[plugins."%s"]' % plug
-        m = re.search(r"(?ms)^" + re.escape(hdr) + r"[ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\Z)", src)
+        m = section("plugins", plug)
+        expected.setdefault("plugins", {}).setdefault(plug, {})["enabled"] = True
         if not m:
             src = src.rstrip("\n") + "\n\n" + hdr + "\nenabled = true\n"
             fixes.append(plug + " 整段缺失->补回")
             continue
         body = m.group(1)
-        if re.search(r"(?m)^\s*enabled\s*=", body):
-            new_body = re.sub(r"(?m)^\s*enabled\s*=.*$", "enabled = true", body, count=1)
+        if re.search(r"(?m)^[ \t]*enabled[ \t]*=", body):
+            new_body = re.sub(r"(?m)^[ \t]*enabled[ \t]*=.*$", "enabled = true", body, count=1)
         else:
             new_body = "enabled = true\n" + body
         if new_body != body:
-            src = src[:m.start(1)] + new_body + src[m.end(1):]
+            separator = "" if src[:m.start(1)].endswith("\n") else "\n"
+            src = src[:m.start(1)] + separator + new_body + src[m.end(1):]
             fixes.append(plug + " -> enabled=true")
 
     mp = os.path.join(os.path.expanduser("~"), ".codex", ".tmp", "bundled-marketplaces", "openai-bundled")
@@ -465,13 +485,16 @@ def ensure_config(active_features=None):
         src = (src.rstrip("\n") + "\n\n[marketplaces.openai-bundled]\nsource_type = \"local\"\n"
                "source = '\\\\?\\" + mp + "'\n")
         fixes.append("marketplaces.openai-bundled 补回")
+        expected.setdefault("marketplaces", {})["openai-bundled"] = {
+            "source_type": "local", "source": "\\\\?\\" + mp}
 
     if src == orig:
         if re.search(r"(?m)^\s*requires_openai_auth\s*=\s*true\s*$", src):
             return "配置完好，无需修补（注意：requires_openai_auth = true，启动后可能停在登录页）"
         return "配置完好，无需修补"
 
-    tomllib.loads(src)
+    if tomllib.loads(src) != expected:
+        raise ValueError("Unsupported configuration layout; unrelated settings would change, so configuration was preserved")
 
     with open(os.path.join(BACKUP_DIR, "config.toml.bak-codexzh"), "w", encoding="utf-8", newline="\n") as f:
         f.write(orig)

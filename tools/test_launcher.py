@@ -86,6 +86,56 @@ class VerificationTests(unittest.TestCase):
             self.assertEqual(data['desktop']['localeOverride'], 'zh-CN')
             self.assertIs(data['plugins']['computer-use@openai-bundled']['enabled'], False)
 
+    def test_config_preserves_existing_plugins_with_toml_header_variants(self):
+        from unittest.mock import patch
+        headers = ('  [plugins."computer-use@openai-bundled"]',
+                   "\t[plugins . 'computer-use@openai-bundled'] # installed",
+                   '["plugins"."computer-use@openai-bundled"]')
+        for header in headers:
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as d:
+                path = Path(d) / 'config.toml'
+                source = header + '\nenabled = true\n[marketplaces.openai-bundled]\nsource_type="local"\n'
+                path.write_text(source, encoding='utf-8')
+                with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d):
+                    module.ensure_config({'computer_use'})
+                    self.assertEqual(path.read_text(encoding='utf-8'), source)
+                    self.assertFalse((Path(d) / 'config.toml.bak-codexzh').exists())
+
+    def test_config_repairs_indented_tables_without_editing_child_settings(self):
+        import tomllib
+        from copy import deepcopy
+        from unittest.mock import patch
+        source = ('model_provider="custom"\n[model_providers.custom]\nbase_url="https://example.invalid"\n'
+                  '  [desktop] # language\nlocaleOverride="en-US"\n'
+                  '    [desktop.appearanceDarkChromeTheme]\nlocaleOverride="child-preference"\n'
+                  "\t[plugins . 'computer-use@openai-bundled'] # missing enabled\n"
+                  'note="preserve"\n  [plugins."computer-use@openai-bundled".settings]\nenabled=false\n'
+                  '  [plugins."chrome@openai-bundled"]\nenabled=false\n'
+                  '[marketplaces.openai-bundled]\nsource_type="local"\n')
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'config.toml'
+            path.write_text(source, encoding='utf-8')
+            expected = deepcopy(tomllib.loads(source))
+            expected['desktop']['localeOverride'] = 'zh-CN'
+            expected['plugins']['computer-use@openai-bundled']['enabled'] = True
+            with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d):
+                module.ensure_config({'i18n', 'computer_use', 'browser_use'})
+                self.assertEqual(tomllib.loads(path.read_text(encoding='utf-8')), expected)
+                self.assertEqual((Path(d) / 'config.toml.bak-codexzh').read_text(encoding='utf-8'), source)
+                first = path.read_bytes()
+                module.ensure_config({'i18n', 'computer_use', 'browser_use'})
+                self.assertEqual(path.read_bytes(), first)
+
+    def test_config_handles_plugin_table_at_end_of_file(self):
+        import tomllib
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'config.toml'
+            path.write_text('  [plugins."computer-use@openai-bundled"]', encoding='utf-8')
+            with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d), patch.object(module.os.path, 'isdir', return_value=False):
+                module.ensure_config({'computer_use'})
+            self.assertIs(tomllib.loads(path.read_text(encoding='utf-8'))['plugins']['computer-use@openai-bundled']['enabled'], True)
+
     def test_target_selection_rejects_other_pages_and_requires_debug_socket(self):
         from unittest.mock import patch
         from io import BytesIO
