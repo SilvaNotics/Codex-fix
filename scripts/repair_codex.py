@@ -11,6 +11,7 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent
@@ -268,9 +269,26 @@ def atomic_write(path, data):
     os.replace(temporary, path)
 
 
+def print_checklist(title, features, active_label, count_label, *, verified=True):
+    count = sum(verified and features.get(role, {}).get('mode') == 'override' for role in ROLES)
+    print(f'{title}（{count}/{len(ROLES)} 项{count_label}）')
+    for role in ROLES:
+        feature = features.get(role, {})
+        mode = feature.get('mode')
+        if mode == 'official-default':
+            status = '官方默认'
+        elif mode == 'override' and verified:
+            status = active_label
+        else:
+            status = '未通过核验'
+        gate = f' [{feature["id"]}]' if feature.get('id') else ''
+        reason = f' ({feature["reason"]})' if role == 'guardian_approval' and feature.get('reason') else ''
+        print(f'  {role}：{status}{gate}{reason}')
+
+
 def run(args):
     launcher = ROOT / 'codex_zh_launch.py'
-    asar = Path(args.asar) if args.asar else find_asar()
+    asar = (Path(args.asar) if args.asar else find_asar()).resolve()
     report = {'status': 'scanning', 'asar': str(asar), 'time': time.strftime('%Y-%m-%dT%H:%M:%S')}
     output = ROOT.parent / 'output'
     logs = output / 'logs'
@@ -282,26 +300,25 @@ def run(args):
     try:
         found, evidence = discover(renderer_sources(asar))
         report.update(found=found, evidence=evidence, defaulted_features=[role for role in ROLES if role not in found])
-        report['features'] = {role: {'mode': 'override' if role in found else 'official-default',
-                                     'id': found.get(role)} for role in ROLES}
+        report['scan_features'] = {role: {'mode': 'override' if role in found else 'official-default',
+                                          'id': found.get(role)} for role in ROLES}
+        print_checklist('扫描清单', report['scan_features'], '扫描命中', '命中')
         if not found:
             raise RuntimeError('未识别到任何可覆盖的开关。请检查当前安装包与修复器的兼容性。')
         before = launcher.read_bytes()
         source = before.decode('utf-8')
-        report['previous'] = current_ids(source)
-        if 'def configure_features(asar):' in source:
+        modern = 'def configure_features(asar):' in source
+        if modern:
             # Runtime discovery supersedes source rewriting and stale ID persistence.
             after = before
         else:
             # Compatibility for older launchers remains fail-closed.
+            report['previous'] = current_ids(source)
             legacy_found = {role: found[role] for role in ROLES[:5] if role in found}
             if set(legacy_found) != set(ROLES[:5]):
                 raise RuntimeError('旧版启动器不支持逐项回退，请先升级项目。')
             after = updated_source(source, legacy_found).encode('utf-8')
-            for role in ROLES[5:]:
-                report['features'][role] = {'mode': 'official-default', 'id': None}
         report['changed'] = after != before
-        print(json.dumps({'previous': report['previous'], 'detected': found, 'changed': report['changed']}, ensure_ascii=False, indent=2))
         if args.scan_only:
             report['status'] = 'scan-only'
             return 0
@@ -315,13 +332,36 @@ def run(args):
         print('正在运行启动器并核验。已有非调试实例可能被重启，请勿在 Codex 执行任务期间运行。', flush=True)
         # Child owns normal launcher mutex. ID repair uses a separate exclusive lock.
         # Do not accept a stale passed report if child exits early due to its mutex.
-        verification = logs / 'verification.json'
-        previous_report = verification.stat().st_mtime_ns if verification.exists() else None
-        completed = subprocess.run([sys.executable, str(launcher)], timeout=240)
-        state = json.loads(verification.read_text(encoding='utf-8')) if verification.exists() else {}
-        if completed.returncode or state.get('status') != 'passed' or verification.stat().st_mtime_ns == previous_report:
-            raise RuntimeError('启动后的真实界面核验未通过；如有修改将恢复启动器。')
-        report['features'].update(state.get('features', {}))
+        command = [sys.executable, str(launcher)]
+        if modern:
+            with tempfile.TemporaryDirectory(prefix='repair-', dir=logs) as directory:
+                verification = Path(directory) / 'verification.json'
+                completed = subprocess.run([*command, '--repair', str(asar), str(verification)], timeout=660)
+                state = json.loads(verification.read_text(encoding='utf-8')) if verification.exists() else {}
+            features = state.get('features', {})
+            consistent = set(features) == set(ROLES) and all(
+                (features[role].get('mode'), features[role].get('id')) == (scan['mode'], scan['id'])
+                for role, scan in report['scan_features'].items())
+            if features and not consistent:
+                print_checklist('启动核验清单', {}, '核验通过', '通过', verified=False)
+                raise RuntimeError('扫描与启动核验的开关清单不一致，请重新运行修复。')
+        else:
+            verification = logs / 'verification.json'
+            previous_report = verification.stat().st_mtime_ns if verification.exists() else None
+            completed = subprocess.run(command, timeout=240)
+            state = json.loads(verification.read_text(encoding='utf-8')) if (
+                verification.exists() and verification.stat().st_mtime_ns != previous_report) else {}
+            features = {role: {'mode': 'override' if role in legacy_found else 'official-default',
+                               'id': legacy_found.get(role)} for role in ROLES}
+            features.update(state.get('features', {}))
+            consistent = True
+        verified = completed.returncode == 0 and state.get('status') == 'passed' and consistent
+        print_checklist('启动核验清单', features, '核验通过', '通过', verified=verified)
+        if not verified:
+            if features:
+                report['features'] = features
+            raise RuntimeError(state.get('error') or '未取得本次启动的有效核验结果。')
+        report['features'] = features
         defaults = [role for role in ROLES if report['features'][role].get('mode') != 'override']
         report['defaulted_features'] = defaults
         if len(defaults) == len(ROLES):

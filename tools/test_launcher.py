@@ -47,6 +47,48 @@ class VerificationTests(unittest.TestCase):
         self.assertTrue(module.verification_failures(state))
         self.assertTrue(module.verification_failures({}))
 
+    def test_guardian_gets_rechecked_after_renderer_is_ready(self):
+        import asyncio
+        from unittest.mock import AsyncMock, Mock, patch
+        state = self.healthy()
+        gates = module.REQUIRED_GATES
+        probe = AsyncMock(side_effect=[
+            {'status': 'blocked', 'reason': 'local-principal-not-ready'},
+            {'status': 'ready-local', 'local_override': 'passed'},
+        ])
+        rpc = Mock(evaluate=AsyncMock(return_value=json.dumps(state)))
+        with patch.object(module, 'ACTIVE_FEATURES', module.ACTIVE_FEATURES | {'guardian_approval'}), patch.object(module, 'probe_guardian', probe), patch.object(module.asyncio, 'sleep', AsyncMock()):
+            result, failures = asyncio.run(module.wait_for_verification(rpc, verify_only=False))
+        self.assertEqual(failures, [])
+        self.assertEqual(result['guardian_approval']['status'], 'ready-local')
+        self.assertEqual(probe.await_count, 2)
+        self.assertEqual(result['gates'], {gate: True for gate in gates})
+
+    def test_repair_waits_for_running_launcher_and_writes_its_own_report(self):
+        import ctypes
+        import sys
+        from unittest.mock import Mock, patch
+
+        kernel = Mock()
+        kernel.CreateMutexW.return_value = 123
+        kernel.WaitForSingleObject.return_value = 0
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / 'verification.json'
+            private = shared.with_name('repair-verification.json')
+
+            async def finish(verify_only, repair_asar):
+                self.assertFalse(verify_only)
+                self.assertEqual(repair_asar, 'fixture.asar')
+                kernel.WaitForSingleObject.assert_called_once_with(123, 180_000)
+                module.write_report({'status': 'passed'})
+
+            with patch.object(sys, 'argv', ['launcher', '--repair', 'fixture.asar', str(private)]), patch.object(ctypes, 'WinDLL', return_value=kernel, create=True), patch.object(module, 'REPORT', str(shared)), patch.object(module, 'REPAIR_REPORT', None), patch.object(module, 'main', finish), patch.object(module, 'log'):
+                self.assertEqual(module.entry(), 0)
+            self.assertEqual(json.loads(private.read_text(encoding='utf-8')), {'status': 'passed'})
+            self.assertEqual(private.read_bytes(), shared.read_bytes())
+        kernel.ReleaseMutex.assert_called_once_with(123)
+        kernel.CloseHandle.assert_called_once_with(123)
+
     def test_report_overwrites_old_success_atomically(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'verify.json'

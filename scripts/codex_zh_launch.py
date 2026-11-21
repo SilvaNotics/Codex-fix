@@ -65,6 +65,7 @@ ACTIVE_FEATURES = {"computer_use", "browser_use_external", "browser_use", "layou
 FEATURE_POLICY = {}
 PATCH_VERSION = "layout-v1"
 REPORT = os.path.join(LOG_DIR, "verification.json")
+REPAIR_REPORT = None
 
 
 def verification_failures(state, check_guardian=True):
@@ -95,10 +96,15 @@ def verification_failures(state, check_guardian=True):
 def write_report(report, path=None):
     """不记录正文、账号或配置；原子替换，避免失败后残留上次成功报告。"""
     from pathlib import Path
-    target = Path(path or REPORT)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, target)
+    paths = [path or REPORT]
+    if path is None and REPAIR_REPORT is not None:
+        paths.append(REPAIR_REPORT)
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    for destination in paths:
+        target = Path(destination)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, target)
 
 
 def component_diagnostics():
@@ -137,15 +143,15 @@ class CdpSession:
             raise RuntimeError("JavaScript: " + str(result["exceptionDetails"]))
         return result.get("result", {}).get("value")
 
-async def probe_guardian(rpc, verify_only=False):
+async def probe_guardian(rpc, verify_only=False, timeout=45):
     """Apply a local feature default without requiring Statsig connectivity."""
     from pathlib import Path
     try:
         source = (Path(PROJECT_ROOT) / "assets" / "guardian_approval.js").read_text(encoding="utf-8")
         expression = source + "(" + json.dumps({"refresh": False,
                                                 "installLocalOverride": not verify_only,
-                                                "timeoutMs": 45000}) + ")"
-        result = await rpc.evaluate(expression, await_promise=True, timeout=55)
+                                                "timeoutMs": max(1, int(timeout * 1000))}) + ")"
+        result = await rpc.evaluate(expression, await_promise=True, timeout=timeout + 1)
         if not isinstance(result, dict):
             raise ValueError("invalid guardian result")
         return result
@@ -578,12 +584,34 @@ async def wait_for_page(timeout=120):
     raise RuntimeError('Codex 仍在运行，但未在限定时间内创建 app:// 页面。请检查最新应用日志。')
 
 
-async def main(verify_only=False):
+async def wait_for_verification(rpc, verify_only):
+    deadline = time.monotonic() + (5 if verify_only else 120)
+    state = {}
+    guardian = None
+    while time.monotonic() < deadline:
+        state = json.loads(await rpc.evaluate(STATE) or "{}")
+        if not verification_failures(state, check_guardian=False):
+            remaining = deadline - time.monotonic()
+            if "guardian_approval" in ACTIVE_FEATURES and remaining > 0:
+                guardian = await probe_guardian(rpc, verify_only=verify_only, timeout=min(10, remaining))
+                state["guardian_approval"] = guardian
+            if not verification_failures(state):
+                break
+        await asyncio.sleep(min(1, max(0, deadline - time.monotonic())))
+    if guardian is not None:
+        state["guardian_approval"] = guardian
+    return state, verification_failures(state)
+
+
+async def main(verify_only=False, repair_asar=None):
     global PORT, EXE
     EXE = await asyncio.to_thread(find_exe)
     if not EXE:
         raise RuntimeError("没找到 OpenAI.Codex 安装目录")
-    await asyncio.to_thread(configure_features, os.path.join(os.path.dirname(EXE), "resources", "app.asar"))
+    asar = os.path.join(os.path.dirname(EXE), "resources", "app.asar")
+    if repair_asar is not None and os.path.normcase(os.path.realpath(asar)) != os.path.normcase(os.path.realpath(repair_asar)):
+        raise RuntimeError("扫描后 Codex 安装包已变化，请重新运行修复。")
+    await asyncio.to_thread(configure_features, asar)
     if not verify_only:
         from startup_health import repair_catalog_path
         catalog = repair_catalog_path(CONFIG, BACKUP_DIR)
@@ -644,19 +672,9 @@ async def main(verify_only=False):
         if not verify_only:
             await rpc.call("Page.addScriptToEvaluateOnNewDocument", {"source": PATCH})
             await rpc.evaluate(PATCH)
-        deadline = time.monotonic() + (5 if verify_only else 120)
-        state = {}
-        while time.monotonic() < deadline:
-            state = json.loads(await rpc.evaluate(STATE) or "{}")
-            failures = verification_failures(state, check_guardian=False)
-            if not failures:
-                if "guardian_approval" in ACTIVE_FEATURES:
-                    guardian = await probe_guardian(rpc, verify_only=verify_only)
-                    state["guardian_approval"] = guardian
-                    FEATURE_POLICY["guardian_approval"].update(guardian)
-                break
-            await asyncio.sleep(1)
-        failures = verification_failures(state)
+        state, failures = await wait_for_verification(rpc, verify_only)
+        if "guardian_approval" in state:
+            FEATURE_POLICY["guardian_approval"].update(state["guardian_approval"])
         write_report({"status": "failed" if failures else "passed",
                       "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                       "app_path": EXE, "port": PORT, "state": state, "features": FEATURE_POLICY,
@@ -672,28 +690,41 @@ async def main(verify_only=False):
 
 
 def entry():
+    global REPAIR_REPORT
     import argparse
     import ctypes
     parser = argparse.ArgumentParser(description="Codex 中文/CU/官方导航启动与核验")
     parser.add_argument("--verify-only", action="store_true", help="只读核验，不注入、不修配置、不启动应用")
+    parser.add_argument("--repair", nargs=2, metavar=("ASAR", "REPORT"), help=argparse.SUPPRESS)
     options = parser.parse_args()
-    # 命名 mutex 防止重复点击并发启动；句柄退出时关闭，不依赖遗留 pid 文件。
+    repair_asar, REPAIR_REPORT = options.repair or (None, None)
+    # 普通启动去重，自动修复则等待当前启动器释放所有权后进行自己的核验。
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateMutexW.restype = ctypes.c_void_p
     kernel.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel.ReleaseMutex.argtypes = [ctypes.c_void_p]
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     handle = kernel.CreateMutexW(None, False, "Local\\CodexZhLauncher")
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
-    if ctypes.get_last_error() == 183:
-        kernel.CloseHandle(handle)
-        log("已有启动器正在执行，本次退出")
-        return 0
+    acquired = False
     try:
+        wait = kernel.WaitForSingleObject(handle, 180_000 if options.repair else 0)
+        if wait == 258:  # WAIT_TIMEOUT
+            if options.repair:
+                write_report({"status": "failed", "error": "等待正在运行的启动器超时，请稍后重试。"}, REPAIR_REPORT)
+                return 1
+            log("已有启动器正在执行，本次退出")
+            return 0
+        if wait not in (0, 0x80):  # WAIT_OBJECT_0 / WAIT_ABANDONED
+            raise ctypes.WinError(ctypes.get_last_error())
+        acquired = True
         write_report({"status": "checking", "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
                       "components": {"status": "pending"}})
         log("---- 开始核验 ----")
-        asyncio.run(main(options.verify_only))
+        asyncio.run(main(options.verify_only, repair_asar))
         log("---- 结束（CDP 客户端已断开，无常驻守卫） ----")
         return 0
     except Exception as error:
@@ -706,10 +737,12 @@ def entry():
             write_report(report)
         except Exception:
             pass
-        if not options.verify_only:
+        if not options.verify_only and not options.repair:
             ctypes.windll.user32.MessageBoxW(None, str(error), "Codex 启动/兼容性核验失败", 0x10)
         return 1
     finally:
+        if acquired:
+            kernel.ReleaseMutex(handle)
         kernel.CloseHandle(handle)
 
 

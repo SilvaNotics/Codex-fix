@@ -55,16 +55,52 @@ class RepairTests(unittest.TestCase):
             logs = root.parent/'output/logs'
             policy = {role: {'mode': 'override' if role == 'ssh' else 'official-default'} for role in repair.ROLES}
 
+            from contextlib import redirect_stdout
+            from io import StringIO
+            policy['ssh']['id'] = '702'
+
             def child(command, **kwargs):
-                if len(command) == 2:
-                    (logs/'verification.json').write_text(json.dumps({'status': 'passed', 'features': policy}), encoding='utf-8')
+                if command[1] != '-c':
+                    self.assertEqual(command[2], '--repair')
+                    self.assertEqual(Path(command[3]), Path('test.asar').resolve())
+                    Path(command[4]).write_text(json.dumps({'status': 'passed', 'features': policy}), encoding='utf-8')
                 return SimpleNamespace(returncode=0)
 
-            with patch.object(repair, 'ROOT', root), patch.object(repair, 'renderer_sources', return_value=[('remote.js', REMOTE_HOSTS)]), patch.object(repair.subprocess, 'run', side_effect=child):
+            output = StringIO()
+            with patch.object(repair, 'ROOT', root), patch.object(repair, 'renderer_sources', return_value=[('remote.js', REMOTE_HOSTS)]), patch.object(repair.subprocess, 'run', side_effect=child), redirect_stdout(output):
                 self.assertEqual(repair.run(Namespace(asar='test.asar', scan_only=False)), 0)
             report = json.loads((logs/'repair-report.json').read_text(encoding='utf-8'))
             self.assertEqual(report['status'], 'partial')
             self.assertCountEqual(report['defaulted_features'], set(repair.ROLES) - {'ssh'})
+            self.assertNotIn('previous', report)
+            lines = output.getvalue().splitlines()
+            self.assertIn('扫描清单（1/13 项命中）', lines)
+            self.assertIn('启动核验清单（1/13 项通过）', lines)
+            scan = [line for line in lines[1:14]]
+            verified = lines[lines.index('启动核验清单（1/13 项通过）') + 1:][:13]
+            for phase in (scan, verified):
+                self.assertEqual([line.strip().split('：')[0] for line in phase], list(repair.ROLES))
+
+    def test_shared_report_cannot_be_mistaken_for_this_repair(self):
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'scripts'
+            root.mkdir()
+            (root/'codex_zh_launch.py').write_bytes((ROOT/'codex_zh_launch.py').read_bytes())
+            logs = root.parent/'output/logs'
+
+            def child(command, **kwargs):
+                if command[1] != '-c':
+                    (logs/'verification.json').write_text('{"status":"passed"}', encoding='utf-8')
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(repair, 'ROOT', root), patch.object(repair, 'renderer_sources', return_value=[('test.js', FIXTURE)]), patch.object(repair.subprocess, 'run', side_effect=child):
+                self.assertEqual(repair.run(Namespace(asar='test.asar', scan_only=False)), 1)
+            report = json.loads((logs/'repair-report.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['status'], 'failed')
+            self.assertNotIn('features', report)
 
     def test_reactive_mini_layout_needs_both_pets_branches(self):
         mini = ('M={collection:{id:"pets-collection"},visibility:{id:"pets-visibility"}},'
