@@ -21,7 +21,70 @@ A=(0,r.un)(h.u,({get:e})=>e(I.JW,"104")),S=0;function O(){if(!t(A)&&!h)return"le
 '''
 
 
+REMOTE_HOSTS = '''
+let sentinel="701",gate="702",state=(0,r.un)(l.u,({get:e})=>{let t=e(a.Dc),{data:n}=e(s.I2,t);return allowed(n?.config,e(p.JW,gate))});function allowed(cfg,rollout){if(!0===cfg?.["features.remote_connections"])return!0;let features=cfg?.features;return null==features||"object"!=typeof features||Array.isArray(features)?rollout:Object.getOwnPropertyDescriptor(features,"remote_connections")?.value===!0||rollout}
+'''
+
+
 class RepairTests(unittest.TestCase):
+    def test_no_overrides_fails_without_launching(self):
+        from argparse import Namespace
+        from unittest.mock import patch
+        for scan_only in (False, True):
+            with self.subTest(scan_only=scan_only), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / 'scripts'
+                root.mkdir()
+                launcher = root/'codex_zh_launch.py'
+                launcher.write_bytes((ROOT/'codex_zh_launch.py').read_bytes())
+                with patch.object(repair, 'ROOT', root), patch.object(repair, 'renderer_sources', return_value=[]), patch.object(repair.subprocess, 'run') as child:
+                    status = repair.run(Namespace(asar='test.asar', scan_only=scan_only))
+                child.assert_not_called()
+                report = json.loads((root.parent/'output/logs/repair-report.json').read_text(encoding='utf-8'))
+                self.assertNotEqual(status, 0)
+                self.assertEqual(report['status'], 'failed')
+                self.assertCountEqual(report['defaulted_features'], repair.ROLES)
+
+    def test_partial_overrides_report_partial_after_successful_runtime_check(self):
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'scripts'
+            root.mkdir()
+            (root/'codex_zh_launch.py').write_bytes((ROOT/'codex_zh_launch.py').read_bytes())
+            logs = root.parent/'output/logs'
+            policy = {role: {'mode': 'override' if role == 'ssh' else 'official-default'} for role in repair.ROLES}
+
+            def child(command, **kwargs):
+                if len(command) == 2:
+                    (logs/'verification.json').write_text(json.dumps({'status': 'passed', 'features': policy}), encoding='utf-8')
+                return SimpleNamespace(returncode=0)
+
+            with patch.object(repair, 'ROOT', root), patch.object(repair, 'renderer_sources', return_value=[('remote.js', REMOTE_HOSTS)]), patch.object(repair.subprocess, 'run', side_effect=child):
+                self.assertEqual(repair.run(Namespace(asar='test.asar', scan_only=False)), 0)
+            report = json.loads((logs/'repair-report.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['status'], 'partial')
+            self.assertCountEqual(report['defaulted_features'], set(repair.ROLES) - {'ssh'})
+
+    def test_reactive_mini_layout_needs_both_pets_branches(self):
+        mini = ('M={collection:{id:"pets-collection"},visibility:{id:"pets-visibility"}},'
+                'v=(0,n.un)(p.u,({get:e})=>e(x.JW,"703")),other=()=>{return false;},'
+                'T=(0,n.un)(p.u,({get:e})=>{if(!e(f.P,"703"))return[M.pick,M.size,r.d];'
+                'let t=[M.collection,M.createMini];return t})')
+        self.assertEqual(repair.discover([('pets.js', mini)])[0], {'pets_layout': '703'})
+        different = mini.replace('f.P,"703"', 'f.P,"704"')
+        self.assertEqual(repair.discover([('pets.js', different)])[0], {})
+        self.assertEqual(repair.discover([('pets.js', mini.replace('M.createMini', 'M.visibility'))])[0], {})
+
+    def test_remote_host_rollout_binds_the_argument_to_its_id(self):
+        found, _ = repair.discover([('remote.js', REMOTE_HOSTS)])
+        self.assertEqual(found, {'ssh': '702'})
+        changed = REMOTE_HOSTS.replace('e(p.JW,gate)', 'e(p.JW,sentinel)')
+        self.assertEqual(repair.discover([('remote.js', changed)])[0], {'ssh': '701'})
+        self.assertEqual(repair.discover([('a.js', REMOTE_HOSTS), ('b.js', changed)])[0], {})
+        wrong = REMOTE_HOSTS.replace('allowed(n?.config', 'unrelated(n?.config')
+        self.assertEqual(repair.discover([('remote.js', wrong)])[0], {})
+
     def test_semantic_detection(self):
         found, _ = repair.discover([('test.js', FIXTURE)])
         self.assertEqual(found, dict(zip(repair.ROLES, ['101', '102', '103', '104', '105'])))

@@ -430,27 +430,34 @@ def kill_codex():
     return not codex_running()
 
 
-CONFIG = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
-NEED_PLUGINS = ["computer-use@openai-bundled", "chrome@openai-bundled"]
+CONFIG = os.path.join(os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "config.toml")
+PLUGIN_BY_FEATURE = {
+    "computer_use": "computer-use",
+    "browser_use_external": "chrome",
+    "browser_use": "browser",
+}
 
 
 def ensure_config(active_features=None):
     """CC Switch 切换供应商时会用自己那份最小模板整份覆盖 config.toml，
     把 [desktop] localeOverride / 插件 enabled / marketplace 一起冲掉。
     这里在启动前按需把这些项补回来（幂等；改动前备份；改完先做 TOML 校验）。"""
+    from codecs import BOM_UTF8
+    from pathlib import Path
+
+    path = Path(CONFIG)
     try:
-        with open(CONFIG, encoding="utf-8") as f:
-            src = f.read()
+        before = path.read_bytes()
     except FileNotFoundError:
         return "没有 config.toml，跳过"
+    src = before.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     orig = src
     active = ACTIVE_FEATURES if active_features is None else set(active_features)
-    plugins = []
-    if "computer_use" in active:
-        plugins.append(NEED_PLUGINS[0])
-    if active & {"browser_use", "browser_use_external"}:
-        plugins.append(NEED_PLUGINS[1])
-    fixes = []
+    mp = os.path.join(os.path.dirname(CONFIG), ".tmp", "bundled-marketplaces", "openai-bundled")
+    plugins = [name + "@openai-bundled" for role, name in PLUGIN_BY_FEATURE.items() if role in active
+               and (role != "browser_use" or os.path.isfile(os.path.join(
+                   mp, "plugins", name, ".codex-plugin", "plugin.json")))]
+    fixes = ["移除 UTF-8 BOM"] if before.startswith(BOM_UTF8) else []
 
     import tomllib
     from copy import deepcopy
@@ -506,7 +513,6 @@ def ensure_config(active_features=None):
             src = src[:m.start(1)] + separator + new_body + src[m.end(1):]
             fixes.append(plug + " -> enabled=true")
 
-    mp = os.path.join(os.path.expanduser("~"), ".codex", ".tmp", "bundled-marketplaces", "openai-bundled")
     if plugins and "openai-bundled" not in parsed.get("marketplaces", {}) and os.path.isdir(mp):
         src = (src.rstrip("\n") + "\n\n[marketplaces.openai-bundled]\nsource_type = \"local\"\n"
                "source = '\\\\?\\" + mp + "'\n")
@@ -514,7 +520,7 @@ def ensure_config(active_features=None):
         expected.setdefault("marketplaces", {})["openai-bundled"] = {
             "source_type": "local", "source": "\\\\?\\" + mp}
 
-    if src == orig:
+    if src == orig and not fixes:
         if re.search(r"(?m)^\s*requires_openai_auth\s*=\s*true\s*$", src):
             return "配置完好，无需修补（注意：requires_openai_auth = true，启动后可能停在登录页）"
         return "配置完好，无需修补"
@@ -522,12 +528,17 @@ def ensure_config(active_features=None):
     if tomllib.loads(src) != expected:
         raise ValueError("Unsupported configuration layout; unrelated settings would change, so configuration was preserved")
 
-    with open(os.path.join(BACKUP_DIR, "config.toml.bak-codexzh"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(orig)
-    temporary = CONFIG + ".tmp-codexzh"
-    with open(temporary, "w", encoding="utf-8", newline="\n") as f:
-        f.write(src)
-    os.replace(temporary, CONFIG)
+    if path.read_bytes() != before:
+        raise RuntimeError("配置在修补期间发生变化，请重试")
+    (Path(BACKUP_DIR) / "config.toml.bak-codexzh").write_bytes(before)
+    temporary = path.with_name(path.name + ".tmp-codexzh")
+    try:
+        temporary.write_bytes(src.encode("utf-8"))
+        if path.read_bytes() != before:
+            raise RuntimeError("配置在写入前发生变化，请重试")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return "已修补: " + ", ".join(fixes)
 
 
@@ -577,7 +588,7 @@ async def main(verify_only=False):
         from startup_health import repair_catalog_path
         catalog = repair_catalog_path(CONFIG, BACKUP_DIR)
         if catalog['changed']:
-            log('已将模型目录改为 CODEX_HOME 相对路径（兼容原生/WSL）；备份：' + catalog['backup'])
+            log('已将 Windows 模型目录改为 CODEX_HOME 相对路径；备份：' + catalog['backup'])
         from runtime_diagnostics import repair_session_config
         cleanup = repair_session_config(CONFIG)
         if cleanup['changed']:

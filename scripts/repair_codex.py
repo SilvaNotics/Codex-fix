@@ -120,6 +120,21 @@ def discover(sources):
                rf'Array\.isArray\(\5\)\?\1:Object\.getOwnPropertyDescriptor\(\5,"remote_connections"\)\?\.value===!0\|\|\1')
         for match, offset in anchored_matches(ssh, text, 'features.remote_connections', 800, 1000):
             evidence['ssh'].append({'id': match.group(3), 'file': filename, 'offset': offset})
+        # SSH and WSL now share a selector that passes the rollout into a helper.
+        remote_hosts = (
+            rf'let (?P<ids>{ident}="\d+"(?:,{ident}="\d+")*),'
+            rf'{ident}=\(0,{ident}\.{ident}\)\({ident}\.{ident},\(\{{get:(?P<get>{ident})\}}\)=>\{{'
+            rf'let {ident}=[^;{{}}]{{1,120}},\{{data:(?P<data>{ident})\}}=[^;{{}}]{{1,120}};'
+            rf'return (?P<helper>{ident})\((?P=data)\?\.config,(?P=get)\({ident}\.{ident},(?P<gate>{ident})\)\)\}}\);'
+            rf'function (?P=helper)\((?P<cfg>{ident}),(?P<flag>{ident})\)\{{'
+            rf'if\(!0===(?P=cfg)\?\.\["features\.remote_connections"\]\)return!0;'
+            rf'let (?P<features>{ident})=(?P=cfg)\?\.features;return null==(?P=features)\|\|"object"!=typeof (?P=features)\|\|'
+            rf'Array\.isArray\((?P=features)\)\?(?P=flag):Object\.getOwnPropertyDescriptor\((?P=features),'
+            r'"remote_connections"\)\?\.value===!0\|\|(?P=flag)\}')
+        for match, offset in anchored_matches(remote_hosts, text, 'features.remote_connections', 800, 350):
+            ids = dict(re.findall(rf'({ident})="(\d+)"', match['ids']))
+            if match['gate'] in ids:
+                evidence['ssh'].append({'id': ids[match['gate']], 'file': filename, 'offset': offset})
         # Keep allowAppshots and native-supported checks in the vendor code.
         appshots = (rf'if\(!{ident}\(({ident})\)\|\|!({ident})\(({ident})\.JW,"(\d+)"\)'
                     rf'\|\|"windows"===\1&&!\2\(\3\.JW,"(\d+)"\)\)return!1;'
@@ -137,7 +152,16 @@ def discover(sources):
                 rf'"toys.confetti":\{{settings:\[{ident}\.{ident}\.confettiEnabled\.key\]\}}\}}\}}')
         for match, offset in anchored_matches(toys, text, '"toys.confetti"', 450, 150):
             evidence['toys'].append({'id': match.group(1), 'file': filename, 'offset': offset})
-        # This is a dual-layout gate, not a settings-entry or visibility gate.
+        # The reactive Mini selector now lives beside the settings search entries.
+        mini = (
+            rf'(?P<entry>{ident})=\{{[^;]{{0,1200}}?id:"pets-collection"[^;]{{0,850}}?id:"pets-visibility"[^;]{{0,200}}?\}},'
+            rf'{ident}=\(0,{ident}\.{ident}\)\({ident}\.{ident},\(\{{get:(?P<get>{ident})\}}\)=>'
+            rf'(?P=get)\({ident}\.{ident},"(?P<gate>\d+)"\)\),.{{0,1300}}?'
+            rf'if\(!(?P=get)\({ident}\.{ident},"(?P=gate)"\)\)return\[(?P=entry)\.pick,(?P=entry)\.size,[^;]{{0,350}}?;'
+            rf'let {ident}=\[(?P=entry)\.collection,(?P=entry)\.createMini\]')
+        for match, offset in anchored_matches(mini, text, 'id:"pets-visibility"', 1500, 2200):
+            evidence['pets_layout'].append({'id': match['gate'], 'file': filename, 'offset': offset})
+        # Legacy dual-layout selector.
         # Resolve BOTH selected components and their shared pet collection.
         if '"settings.pets.visibility"' in text and '"settings.mini.show"' in text:
             bodies = {}
@@ -257,14 +281,16 @@ def run(args):
     backup = None
     try:
         found, evidence = discover(renderer_sources(asar))
-        report.update(found=found, evidence=evidence)
+        report.update(found=found, evidence=evidence, defaulted_features=[role for role in ROLES if role not in found])
+        report['features'] = {role: {'mode': 'override' if role in found else 'official-default',
+                                     'id': found.get(role)} for role in ROLES}
+        if not found:
+            raise RuntimeError('未识别到任何可覆盖的开关。请检查当前安装包与修复器的兼容性。')
         before = launcher.read_bytes()
         source = before.decode('utf-8')
         report['previous'] = current_ids(source)
         if 'def configure_features(asar):' in source:
             # Runtime discovery supersedes source rewriting and stale ID persistence.
-            report['features'] = {role: {'mode': 'override' if role in found else 'official-default',
-                                         'id': found.get(role)} for role in ROLES}
             after = before
         else:
             # Compatibility for older launchers remains fail-closed.
@@ -272,6 +298,8 @@ def run(args):
             if set(legacy_found) != set(ROLES[:5]):
                 raise RuntimeError('旧版启动器不支持逐项回退，请先升级项目。')
             after = updated_source(source, legacy_found).encode('utf-8')
+            for role in ROLES[5:]:
+                report['features'][role] = {'mode': 'official-default', 'id': None}
         report['changed'] = after != before
         print(json.dumps({'previous': report['previous'], 'detected': found, 'changed': report['changed']}, ensure_ascii=False, indent=2))
         if args.scan_only:
@@ -293,10 +321,12 @@ def run(args):
         state = json.loads(verification.read_text(encoding='utf-8')) if verification.exists() else {}
         if completed.returncode or state.get('status') != 'passed' or verification.stat().st_mtime_ns == previous_report:
             raise RuntimeError('启动后的真实界面核验未通过；如有修改将恢复启动器。')
-        report['features'] = state.get('features', report.get('features', {}))
-        report['status'] = 'passed'
-        defaults = [role for role, policy in report['features'].items() if policy['mode'] == 'official-default']
+        report['features'].update(state.get('features', {}))
+        defaults = [role for role in ROLES if report['features'][role].get('mode') != 'override']
         report['defaulted_features'] = defaults
+        if len(defaults) == len(ROLES):
+            raise RuntimeError('启动后没有任何有效的开关覆盖。')
+        report['status'] = 'partial' if defaults else 'passed'
         if defaults:
             print('以下功能已交还官方默认行为（不表示功能已移除或已经可用）：' + ', '.join(defaults))
         print('检测与当前有效覆盖项核验通过。未修改官方安装包或账号配置。')

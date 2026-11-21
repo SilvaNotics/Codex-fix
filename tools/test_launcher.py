@@ -73,6 +73,39 @@ class VerificationTests(unittest.TestCase):
                 module.ensure_config()
                 self.assertEqual(path.read_bytes(), first)
 
+    def test_config_repairs_utf8_bom_and_backs_up_original_bytes(self):
+        import codecs
+        import tomllib
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'config.toml'
+            original = codecs.BOM_UTF8 + b'# Windows editor\r\nmodel="fixture"\r\n'
+            path.write_bytes(original)
+            with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d):
+                module.ensure_config({'i18n'})
+                result = path.read_bytes()
+                data = tomllib.loads(result.decode('utf-8'))
+                self.assertEqual(data, {'model': 'fixture', 'desktop': {'localeOverride': 'zh-CN'}})
+                backup = Path(d) / 'config.toml.bak-codexzh'
+                self.assertEqual(backup.read_bytes(), original)
+                module.ensure_config({'i18n'})
+                self.assertEqual(path.read_bytes(), result)
+                self.assertEqual(backup.read_bytes(), original)
+
+    def test_in_app_browser_uses_its_own_installed_plugin(self):
+        import tomllib
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'config.toml'
+            path.write_text('model="fixture"', encoding='utf-8')
+            manifest = Path(d) / '.tmp/bundled-marketplaces/openai-bundled/plugins/browser/.codex-plugin/plugin.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('{"name":"browser"}', encoding='utf-8')
+            with patch.object(module, 'CONFIG', str(path)), patch.object(module, 'BACKUP_DIR', d):
+                module.ensure_config({'browser_use'})
+            plugins = tomllib.loads(path.read_text(encoding='utf-8'))['plugins']
+            self.assertEqual(plugins, {'browser@openai-bundled': {'enabled': True}})
+
     def test_config_accepts_section_comments(self):
         import tomllib
         from unittest.mock import patch

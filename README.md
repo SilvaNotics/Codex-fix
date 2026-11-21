@@ -6,6 +6,8 @@
 
 已验证安装包：`OpenAI.Codex 26.1103.4239.0` 与 `26.1103.7773.0`（Windows MSIX，x64）；后者已做安装包结构匹配检查，SSH / Appshots 完整任务仍需实际使用验证。新版兼容性以实际扫描和核验结果为准。
 
+`26.1117.3838.0` 已通过本机安装包结构扫描。扫描器可识别新版 SSH/WSL 共用的远程连接开关和响应式 Mini 布局选择器。应用内浏览器与外部 Chrome 分别使用各自的插件配置。
+
 ## 1. 功能与限制
 
 | 项目 | 本项目的作用 |
@@ -13,7 +15,7 @@
 | 中文界面 | 覆盖已识别的语言开关，按需补充中文配置 |
 | 电脑操控 / Chrome / 应用内浏览器 | 配合主进程环境、插件配置与渲染层开关启用入口 |
 | 官方导航布局 | 明确匹配时启用官方组件，不修改 DOM/CSS |
-| SSH 连接设置 | 补齐结构明确匹配的远程连接入口开关，保留本地主机与工作模式限制 |
+| SSH / WSL 连接设置 | 补齐结构明确匹配的远程连接入口开关，保留本地主机与工作模式限制 |
 | 应用快照（Appshots） | 补齐通用与 Windows rollout 开关，保留管理员策略和原生 helper 能力检查 |
 | 彩带特效 | 匹配 `toys` 总开关；保留 `confettiEnabled` 用户设置，不自动播放；此总开关也包含音频可视化，但保留其用户设置 |
 | 听写 | 匹配输入框听写与全局听写 rollout；保留 ChatGPT 登录、麦克风权限、宿主和服务端限制，不自动开麦，不覆盖实时语音开关 |
@@ -169,7 +171,7 @@
 repair-codex.cmd
 ```
 
-它寻找 Python 3.11+ 与 `websockets`，扫描安装包并调用启动器检查；必要时可能重启 Codex。它不是保证修好所有新版的工具。
+普通修复会先检查 VBS 编码，再寻找 Python 3.11+ 与 `websockets`。随后扫描安装包并调用启动器核验，必要时可能重启 Codex。
 
 ### 自动适配规则
 
@@ -179,11 +181,12 @@ repair-codex.cmd
 - 回退项不新增对应语言或插件配置；已有用户配置不擅自删除。
 - SDK/CDP 整体异常或安装包损坏仍明确报错，不以回退掩盖失败。
 - 已知结构内的 ID / 混淆变量改名可适配；功能实现、打包结构或 SDK 行为大改仍需人工处理。
+- `repair-report.json` 在全部已登记项通过核验时写 `passed`。部分覆盖通过时写 `partial`，并列出 `defaulted_features`。零项命中时写 `failed`，返回非零退出码，直接结束修复。
 
-只扫描，不启动应用：
+只扫描并生成报告，跳过 VBS 编码修复和应用启动：
 
 ```powershell
-& 'C:\实际路径\python.exe' './scripts/repair_codex.py' --scan-only
+.\repair-codex.cmd --scan-only
 ```
 
 对已有实例只做核验，不注入、不改配置、不启动或重启应用（会更新核验报告）：
@@ -204,15 +207,17 @@ repair-codex.cmd
 
 #### 自动检查与修复
 
-双击根目录 `CLICKME.cmd`。入口自身仅含 ASCII，不依赖系统代码页；在启动前将 `scripts/start-codex.vbs` 规范为 UTF-16 LE BOM。首次转换备份保存于 `output/backups/start-codex.vbs.bak-encoding`，重复运行不覆盖原备份；无法严格解码时停止，不猜测源编码。
+`CLICKME.cmd` 和普通 `repair-codex.cmd` 共用同一编码检查。严格解码 UTF-8（有无 BOM 均可）和带 BOM 的 UTF-16 LE，并将有效的脚本统一为 UTF-16 LE BOM。已有正确编码时保持原样。解码失败时保留原文件并停止。首次转换备份保存在 `output/backups/start-codex.vbs.bak-encoding`。
+
+若 Windows `config.toml` 带 UTF-8 BOM，启动器会先解析并校验 TOML，备份原始字节，再写回 UTF-8 无 BOM。
 
 文件若已被错误解码并保存，转码不能找回丢失字符，请重新下载。仍有语法错误时请提供具体文件、行号与系统版本。
 
 ### 5.2 页面目标不存在或启动前退出
 
-WSL 模式下，`model_catalog_json` 若仍是 Windows 绝对路径，Linux 内核会在加载配置时报告 `No such file or directory`，桌面进程可能尚未创建页面就退出。启动器会将 **CODEX_HOME 内已存在的模型目录文件**改为 `./相对路径`，兼容原生和 WSL；写前备份，校验除该键外的 TOML 内容不变，不切换运行环境、不修改供应商。目录外的路径不猜测转换，缺失文件直接报告。
+Windows 启动器会将 **Windows `CODEX_HOME` 内已存在的模型目录文件**改为 `./相对路径`，写前备份并校验 TOML。WSL 独立连接读取发行版用户自己的配置，其中 `model_catalog_json` 应指向 WSL 可访问的文件。用 [WSL 迁移入口](#54-迁移到独立的-wsl-连接)生成对应的挂载路径。
 
-页面等待改为按实际时间限时；应用已退出时立即报告配置/启动错误，不再反复等待一个不存在的页面。目标发现复用同一入口，并跳过没有调试 WebSocket 的目标。当前版本已实际通过原入口 `start-codex.vbs` 启动、中文/导航/有效开关核验，以及真实 WSL 配置加载检查。
+页面等待按实际时间限时。应用退出时启动器会立即报告配置或启动错误。
 
 ### 5.3 其他问题
 
@@ -226,6 +231,22 @@ WSL 模式下，`model_catalog_json` 若仍是 Windows 绝对路径，Linux 内�
 | `Workspace routing is unavailable` | 检查真实账号、工作区与官方服务网络；本项目不伪造云端权限 |
 | “始终允许的应用”列表为空 | 检查 app tools / `cua_repl` 与账号状态；`authStatus=unsupported` 不能靠界面开关解决 |
 | REPL 内核退出 / `windows sandbox failed` | 检查 Codex 自身 REPL 与沙箱日志；这是运行时问题，不能凭本项目的 `passed` 判断已修复 |
+
+### 5.4 迁移到独立的 WSL 连接
+
+1. 双击 **`MOVE_TO_WSL.cmd`**，输入发行版编号。脚本会列出目标默认用户、`~/.codex/config.toml` 和转换后的模型目录路径。
+2. 输入 `yes` 确认合并。现有 WSL 配置会备份到同目录的 `config.toml.bak-move-to-wsl-*`。配置会重新格式化，原注释保留在备份中。
+3. 在 Codex 的连接设置中重连该 WSL 发行版。Windows 上切换 CC Switch 供应商后，重新运行脚本以更新 WSL 的供应商配置。
+
+迁移需要 Windows Python 3.11+ 和目标发行版的 `python3`。也可在 PowerShell 指定发行版先预检：
+
+```powershell
+.\MOVE_TO_WSL.cmd --distro Ubuntu --dry-run
+```
+
+脚本读取 Windows `CODEX_HOME`（默认 `%USERPROFILE%\.codex`）实际生效的配置。当前 CC Switch 端点、模型和写入供应商表的 token 会一同迁移。相对模型目录先按 Windows 配置目录解析，再通过所选发行版的 `wslpath` 转换并验证。例如 `./cc-switch-model-catalog.json` 可继续引用 `/mnt/c/Users/<Windows用户>/.codex/cc-switch-model-catalog.json`。
+
+现有 WSL 桌面、插件、钩子和同名 MCP 设置会保留。CC Switch 数据库和 ChatGPT 登录资料留在原宿主。旧版仅含 API Key 的 `auth.json` 在自定义供应商需要它时可写入空白目标。使用 `env_key`、Windows localhost 代理或宿主专用命令时，需要在 WSL 连接环境中提供对应配置。
 
 ## 6. 卸载与回滚
 
